@@ -511,6 +511,7 @@ export interface McpOutputGuardSettings {
 // Settings
 export type ToolPrefix = "server" | "none" | "short" | "mcp";
 export type HostConfigDiscovery = "off" | "prompt" | "on";
+export type ProjectConfigDiscovery = "off" | "on";
 export type McpFooterStatus = "full" | "compact" | "off";
 
 export interface McpTraceSettings {
@@ -551,6 +552,8 @@ export interface McpSettings {
   notifyOnStartupConnect?: boolean;
   /** Discover detected host-specific MCP configs only when explicitly enabled. */
   hostConfigDiscovery?: HostConfigDiscovery;
+  /** Load MCP configuration from the active project. Defaults to on for compatibility. */
+  projectConfigDiscovery?: ProjectConfigDiscovery;
   /** Agent Plugin package directories to load MCP servers from. */
   agentPluginPaths?: string[];
   idleTimeout?: number; // minutes, default 10, 0 to disable
@@ -581,7 +584,10 @@ export interface McpSettings {
    * and explicit reconnects won't rebuild the system prompt, preserving the
    * prompt-cache prefix. Proxy/search/cache metadata still refreshes. Default: false. */
   freezeDirectTools?: boolean;
+  /** Automatically run OAuth from connect and tool calls instead of returning auth-start guidance. */
   autoAuth?: boolean;
+  /** Offer pasted callback input if automatic localhost OAuth completion is unavailable. Defaults to true. */
+  manualOAuthCallbackFallback?: boolean;
   sampling?: boolean;
   samplingAutoApprove?: boolean;
   elicitation?: boolean;

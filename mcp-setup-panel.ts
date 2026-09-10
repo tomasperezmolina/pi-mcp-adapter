@@ -118,6 +118,7 @@ export class McpSetupPanel {
     this.tui = tui;
     this.keys = createPanelKeys(options.keybindings);
     this.screen = options.mode;
+    if (discovery.projectConfigDiscovery === "off") this.sharedConfigTarget = "global";
     for (const entry of discovery.imports) {
       this.selectedImports.add(entry.kind);
     }
@@ -147,13 +148,15 @@ export class McpSetupPanel {
     if (this.discovery.imports.length > 0) {
       actions.push({ id: "adopt-imports", label: "Adopt detected compatibility imports", description: `Choose which host-specific MCP configs Pi should import into its own override file. ${this.discovery.imports.length} source${this.discovery.imports.length === 1 ? "" : "s"} found.` });
     }
-    actions.push(
-      { id: "select-shared-target", label: `${this.sharedConfigTarget === "project" ? "●" : "○"} Add to this project (.mcp.json)`, description: "Write new shared MCP servers to the project/team config.", target: "project" },
-      { id: "select-shared-target", label: `${this.sharedConfigTarget === "global" ? "●" : "○"} Add globally (~/.config/mcp/mcp.json)`, description: "Write new shared MCP servers to your all-projects config.", target: "global" },
-    );
+    if (this.discovery.projectConfigDiscovery === "on") {
+      actions.push(
+        { id: "select-shared-target", label: `${this.sharedConfigTarget === "project" ? "●" : "○"} Add to this project (.mcp.json)`, description: "Write new shared MCP servers to the project/team config.", target: "project" },
+        { id: "select-shared-target", label: `${this.sharedConfigTarget === "global" ? "●" : "○"} Add globally (~/.config/mcp/mcp.json)`, description: "Write new shared MCP servers to your all-projects config.", target: "global" },
+      );
+    }
     actions.push({ id: "view-example", label: "View example shared config", description: "Preview a working shared MCP config you can paste or adapt." });
     if (!this.selectedSharedConfigExists()) {
-      actions.push({ id: "scaffold-shared-config", label: `Scaffold ${this.sharedTargetLabel()}`, description: "Write a minimal config at the selected normal MCP setup path, then reload Pi." });
+      actions.push({ id: "scaffold-shared-config", label: `Scaffold ${this.sharedTargetLabel()}`, description: "Write a minimal config at the selected active MCP setup path, then reload Pi." });
     }
     actions.push({ id: "show-precedence", label: "Explain config precedence", description: "Show the read order and where Pi writes compatibility settings." });
     if (this.getDetectedPaths().length > 0) {
@@ -513,6 +516,12 @@ export class McpSetupPanel {
   }
 
   private secondarySummaryLine(): string {
+    const inactiveProjectSources = this.discovery.sources.filter(
+      (source) => source.scope === "project" && source.exists && !source.active,
+    ).length;
+    const projectNote = inactiveProjectSources > 0
+      ? `Project MCP discovery is off; ${inactiveProjectSources} detected project source${inactiveProjectSources === 1 ? " is" : "s are"} inactive. `
+      : "";
     const hostNote = this.discovery.hostConfigs.length > 0
       ? ` Host discovery is ${this.discovery.hostConfigDiscovery}; ${this.discovery.hostConfigs.length} host source${this.discovery.hostConfigs.length === 1 ? "" : "s"} detected.`
       : "";
@@ -520,12 +529,12 @@ export class McpSetupPanel {
       ? ` ${this.discovery.conflicts.length} same-name conflict${this.discovery.conflicts.length === 1 ? "" : "s"} reported.`
       : "";
     if (!this.discovery.hasAnyConfig) {
-      return `Add shared servers to .mcp.json for this project/team or ~/.config/mcp/mcp.json for all projects. Adopt host imports or quick-add RepoPrompt from this screen.${hostNote}${conflictNote}`;
+      return `${projectNote}Add shared servers to .mcp.json for this project/team or ~/.config/mcp/mcp.json for all projects. Adopt host imports or quick-add RepoPrompt from this screen.${hostNote}${conflictNote}`;
     }
     if (this.discovery.totalServerCount === 0 && this.discovery.imports.length > 0) {
-      return `Detected ${this.discovery.imports.length} compatibility import source${this.discovery.imports.length === 1 ? "" : "s"}. Adopt them into Pi or inspect the underlying files.${hostNote}${conflictNote}`;
+      return `${projectNote}Detected ${this.discovery.imports.length} compatibility import source${this.discovery.imports.length === 1 ? "" : "s"}. Adopt them into Pi or inspect the underlying files.${hostNote}${conflictNote}`;
     }
-    return `Use .mcp.json for project/team servers or ~/.config/mcp/mcp.json for all projects. Pi-owned files are for compatibility imports and adapter-specific overrides, not another normal setup path.${hostNote}${conflictNote}`;
+    return `${projectNote}Use .mcp.json for project/team servers or ~/.config/mcp/mcp.json for all projects. Pi-owned files are for compatibility imports and adapter-specific overrides, not another normal setup path.${hostNote}${conflictNote}`;
   }
 
   private visibleActionRange(total: number): { start: number; end: number } {
@@ -577,7 +586,9 @@ export class McpSetupPanel {
           "  }",
           "}",
           "",
-          "Use Scaffold selected config when you want a safe empty shell instead of a live example server.",
+          this.discovery.projectConfigDiscovery === "on"
+            ? "Use Scaffold selected config when you want a safe empty shell instead of a live example server."
+            : "Project MCP discovery is off, so known servers are written to user-global config.",
         ], previewW);
       case "show-precedence":
         return this.formatPreview([
@@ -596,7 +607,7 @@ export class McpSetupPanel {
           "4. <Pi agent dir>/mcp.json",
           "5. .mcp.json",
           `6. ${getConfigDirName()}/mcp.json`,
-          `Host discovery: ${this.discovery.hostConfigDiscovery}. Conflicts reported: ${this.discovery.conflicts.length}.`,
+          `Project discovery: ${this.discovery.projectConfigDiscovery}. Host discovery: ${this.discovery.hostConfigDiscovery}. Conflicts reported: ${this.discovery.conflicts.length}.`,
           ...this.discovery.conflicts.slice(0, 8).map((conflict) =>
             `${conflict.serverName}: ${conflict.sources.map((source) => source.path).join(" -> ")} (winner: ${conflict.winner.path})`,
           ),

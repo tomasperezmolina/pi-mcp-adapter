@@ -8,6 +8,7 @@ import {
   getMcpDiscoverySummary,
   getMcpStandardConfigSummary,
   type KnownServerPreset,
+  type McpConfigResolutionOptions,
   type SharedConfigTarget,
   getServerProvenance,
   previewCompatibilityImports,
@@ -23,15 +24,12 @@ import { isServerInActiveFailureBackoff } from "./failure-backoff.ts";
 import { loadMetadataCache, reconstructPromptMetadata } from "./metadata-cache.ts";
 import { buildToolMetadata } from "./tool-metadata.ts";
 import { supportsOAuth, authenticate, removeAuth, type McpOAuthRuntime } from "./mcp-auth-flow.ts";
+import { createInteractiveOAuthHandlers } from "./mcp-auth-ui.ts";
 import { getAuthStorageOptions, inspectAuthForUrl } from "./mcp-auth.ts";
 import { inspectBearerTokenForUrl, removeBearerToken } from "./mcp-bearer-store.ts";
 import { loadOnboardingState, markSetupCompleted as persistSetupCompleted, markSharedConfigHintShown } from "./onboarding-state.ts";
 import { openPath, resolveServerUrl, sanitizeTerminalText } from "./utils.ts";
 import { isAbortError } from "./runtime-owner.ts";
-
-function terminalHyperlink(label: string, url: string): string {
-  return `\u001B]8;;${sanitizeTerminalText(url)}\u001B\\${sanitizeTerminalText(label)}\u001B]8;;\u001B\\`;
-}
 
 /**
  * True when this run mode can display a `ctx.ui.custom()` overlay.
@@ -274,6 +272,8 @@ export async function authenticateServer(
   ctx: ExtensionContext,
   signal?: AbortSignal,
   runtime?: McpOAuthRuntime,
+  openBrowser?: (url: string) => Promise<void>,
+  copyText?: (text: string) => Promise<void>,
 ): Promise<McpAuthResult> {
   const ui = ctx.hasUI ? ctx.ui : undefined;
   const cwd = ctx.cwd;
@@ -314,17 +314,12 @@ export async function authenticateServer(
     const authStorageOptions = getAuthStorageOptions(config.settings?.oauthDir, cwd);
     const status = await authenticate(serverName, serverUrl, definition, {
       ...(authStorageOptions.baseDir ? { authStorageOptions } : {}),
-      onAuthorizationUrl: () => {},
-      onAuthorizationInput: async (authorizationUrl, inputSignal) => {
-        if (inputSignal.aborted) return undefined;
-        return ui.input(
-          `Complete ${serverName} OAuth\n\n` +
-            `${terminalHyperlink("Open authorization page", authorizationUrl)}\n${authorizationUrl}\n\n` +
-            "Approve access, then paste the full callback URL from the browser address bar below.",
-          undefined,
-          { signal: inputSignal },
-        );
-      },
+      ...createInteractiveOAuthHandlers(serverName, {
+        ui,
+        manualCallbackFallback: config.settings?.manualOAuthCallbackFallback !== false,
+        ...(openBrowser ? { openBrowser } : {}),
+        ...(copyText ? { copyText } : {}),
+      }),
       ...(signal ? { signal } : {}),
       ...(runtime ? { runtime } : {}),
     });
@@ -345,7 +340,8 @@ export async function authenticateServer(
     ui.notify(`Failed to authenticate "${serverName}": ${message}`, "error");
     return { ok: false, message };
   } finally {
-    if (!signal?.aborted) ui.setStatus("mcp-auth", undefined);
+    const setStatus = ui.setStatus;
+    if (typeof setStatus === "function") setStatus.call(ui, "mcp-auth", undefined);
   }
 }
 
@@ -470,8 +466,12 @@ export interface PanelFlowResult {
   configChanged: boolean;
 }
 
-function buildSharedConfigNoticeLines(configOverridePath: string | undefined, cwd: string): { lines: string[]; fingerprint: string | null } {
-  const discovery = getMcpStandardConfigSummary(configOverridePath, cwd);
+function buildSharedConfigNoticeLines(
+  configOverridePath: string | undefined,
+  cwd: string,
+  options: McpConfigResolutionOptions = {},
+): { lines: string[]; fingerprint: string | null } {
+  const discovery = getMcpStandardConfigSummary(configOverridePath, cwd, options);
   const onboardingState = loadOnboardingState();
   const sharedSources = discovery.sources.filter((source) =>
     (source.id === "shared-project" || source.id === "shared-global") && source.serverCount > 0,
@@ -508,41 +508,49 @@ export async function openMcpSetup(
     return { configChanged: false };
   }
 
-  const discovery = getMcpDiscoverySummary(configOverridePath, ctx.cwd, options);
+  const projectConfigDiscovery = state.config.settings?.projectConfigDiscovery;
+  const discoveryOptions = {
+    ...options,
+    ...(projectConfigDiscovery !== undefined ? { projectConfigDiscovery } : {}),
+  };
+  const discovery = getMcpDiscoverySummary(configOverridePath, ctx.cwd, discoveryOptions);
+  const effectiveSharedTarget = (target: SharedConfigTarget): SharedConfigTarget =>
+    discovery.projectConfigDiscovery === "on" ? target : "global";
   const onboardingState = loadOnboardingState();
   const { createMcpSetupPanel } = await import("./mcp-setup-panel.ts");
   let configChanged = false;
 
   const callbacks = {
     previewImports: (imports: ImportKind[]) => previewCompatibilityImports(imports, configOverridePath),
-    previewStarterConfig: (target: SharedConfigTarget) => previewStarterSharedConfig(target, ctx.cwd),
+    previewStarterConfig: (target: SharedConfigTarget) => previewStarterSharedConfig(effectiveSharedTarget(target), ctx.cwd),
     previewRepoPrompt: (target: SharedConfigTarget) => {
-      const repoPrompt = getMcpDiscoverySummary(configOverridePath, ctx.cwd, options).repoPrompt;
-      if (!repoPrompt.entry || !repoPrompt.targetPath || !repoPrompt.serverName) return null;
-      return previewSharedServerEntry(getSharedConfigPath(target, ctx.cwd), repoPrompt.serverName, repoPrompt.entry);
+      const repoPrompt = getMcpDiscoverySummary(configOverridePath, ctx.cwd, discoveryOptions).repoPrompt;
+      if (!repoPrompt.entry || !repoPrompt.serverName) return null;
+      return previewSharedServerEntry(getSharedConfigPath(effectiveSharedTarget(target), ctx.cwd), repoPrompt.serverName, repoPrompt.entry);
     },
-    previewKnownServer: (preset: KnownServerPreset, target: SharedConfigTarget) => previewSharedServerEntry(getSharedConfigPath(target, ctx.cwd), preset.id, preset.entry),
+    previewKnownServer: (preset: KnownServerPreset, target: SharedConfigTarget) =>
+      previewSharedServerEntry(getSharedConfigPath(effectiveSharedTarget(target), ctx.cwd), preset.id, preset.entry),
     adoptImports: async (imports: ImportKind[]) => {
       const result = ensureCompatibilityImports(imports, configOverridePath);
       if (result.added.length > 0) configChanged = true;
       return result;
     },
     scaffoldConfig: async (target: SharedConfigTarget) => {
-      const path = writeStarterSharedConfig(target, ctx.cwd);
+      const path = writeStarterSharedConfig(effectiveSharedTarget(target), ctx.cwd);
       configChanged = true;
       return { path };
     },
     addRepoPrompt: async (target: SharedConfigTarget) => {
-      const repoPrompt = getMcpDiscoverySummary(configOverridePath, ctx.cwd, options).repoPrompt;
-      if (!repoPrompt.entry || !repoPrompt.targetPath || !repoPrompt.serverName) {
+      const repoPrompt = getMcpDiscoverySummary(configOverridePath, ctx.cwd, discoveryOptions).repoPrompt;
+      if (!repoPrompt.entry || !repoPrompt.serverName) {
         throw new Error("RepoPrompt is not available to add from this setup screen.");
       }
-      const path = writeSharedServerEntry(getSharedConfigPath(target, ctx.cwd), repoPrompt.serverName, repoPrompt.entry);
+      const path = writeSharedServerEntry(getSharedConfigPath(effectiveSharedTarget(target), ctx.cwd), repoPrompt.serverName, repoPrompt.entry);
       configChanged = true;
       return { path, serverName: repoPrompt.serverName };
     },
     addKnownServer: async (preset: KnownServerPreset, target: SharedConfigTarget) => {
-      const path = writeSharedServerEntry(getSharedConfigPath(target, ctx.cwd), preset.id, preset.entry);
+      const path = writeSharedServerEntry(getSharedConfigPath(effectiveSharedTarget(target), ctx.cwd), preset.id, preset.entry);
       configChanged = true;
       return { path, serverName: preset.name };
     },
@@ -588,7 +596,15 @@ function buildMcpPanelCallbacks(
       const overlay = getOverlayHandle?.();
       overlay?.setHidden(true);
       try {
-        return await authenticateServer(serverName, config, ctx, state.owner?.signal, state.oauthRuntime);
+        return await authenticateServer(
+          serverName,
+          config,
+          ctx,
+          state.owner?.signal,
+          state.oauthRuntime,
+          state.openBrowser,
+          state.copyText,
+        );
       } finally {
         overlay?.setHidden(false);
         overlay?.focus();
@@ -659,8 +675,11 @@ export async function openMcpPanel(
   const config = state.config;
   const cache = loadMetadataCache();
   const configPath = pi.getFlag("mcp-config") as string | undefined ?? configOverridePath;
-  const provenanceMap = getServerProvenance(configPath, ctx.cwd);
-  const { lines: noticeLines, fingerprint } = buildSharedConfigNoticeLines(configPath, ctx.cwd);
+  const resolutionOptions = config.settings?.projectConfigDiscovery !== undefined
+    ? { projectConfigDiscovery: config.settings.projectConfigDiscovery }
+    : {};
+  const provenanceMap = getServerProvenance(configPath, ctx.cwd, resolutionOptions);
+  const { lines: noticeLines, fingerprint } = buildSharedConfigNoticeLines(configPath, ctx.cwd, resolutionOptions);
 
   let overlayHandle: OverlayHandle | undefined;
   const callbacks = buildMcpPanelCallbacks(state, config, ctx, () => overlayHandle);
@@ -676,7 +695,7 @@ export async function openMcpPanel(
             if (!result.cancelled && result.disabledChanges.size > 0) {
               for (const [serverName, disabled] of result.disabledChanges) {
                 try {
-                  const override = writeProjectServerDisabledOverride(configPath, ctx.cwd, serverName, disabled);
+                  const override = writeProjectServerDisabledOverride(configPath, ctx.cwd, serverName, disabled, resolutionOptions);
                   if (override.changed) {
                     configChanged = true;
                   }
@@ -743,7 +762,10 @@ export async function openMcpAuthPanel(
 
   const cache = loadMetadataCache();
   const configPath = pi.getFlag("mcp-config") as string | undefined ?? configOverridePath;
-  const provenanceMap = getServerProvenance(configPath, ctx.cwd);
+  const resolutionOptions = config.settings?.projectConfigDiscovery !== undefined
+    ? { projectConfigDiscovery: config.settings.projectConfigDiscovery }
+    : {};
+  const provenanceMap = getServerProvenance(configPath, ctx.cwd, resolutionOptions);
   let overlayHandle: OverlayHandle | undefined;
   const callbacks = buildMcpPanelCallbacks(state, config, ctx, () => overlayHandle);
   const { createMcpPanel } = await import("./mcp-panel.ts");

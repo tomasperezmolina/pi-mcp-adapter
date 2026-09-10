@@ -406,6 +406,36 @@ describe("mcp-auth-flow explicit auth", () => {
     expect(mocks.sdkAuth).toHaveBeenCalledTimes(1);
   });
 
+  it("lets one deduplicated caller cancel without aborting another caller", async () => {
+    let resolveAuth!: (value: string) => void;
+    mocks.sdkAuth.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveAuth = resolve;
+    }));
+    const { authenticate } = await import("../mcp-auth-flow.ts");
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const definition = {
+      url: "https://api.example.com/mcp",
+      auth: "oauth" as const,
+      oauth: {
+        grantType: "client_credentials" as const,
+        clientId: "service-client",
+        clientSecret: "service-secret",
+      },
+    };
+
+    const first = authenticate("independent-waiters", definition.url, definition, { signal: firstController.signal });
+    await Promise.resolve();
+    const second = authenticate("independent-waiters", definition.url, definition, { signal: secondController.signal });
+    const reason = new Error("first caller cancelled");
+    firstController.abort(reason);
+
+    await expect(first).rejects.toBe(reason);
+    resolveAuth("AUTHORIZED");
+    await expect(second).resolves.toBe("authenticated");
+    expect(mocks.sdkAuth).toHaveBeenCalledTimes(1);
+  });
+
   it("runs SDK auth before reporting expired tokens as re-authenticated", async () => {
     const { authenticate } = await import("../mcp-auth-flow.ts");
     const { getOAuthState, updateClientInfo, updateTokens } = await import("../mcp-auth.ts");
@@ -562,7 +592,7 @@ describe("mcp-auth-flow explicit auth", () => {
 
   it("preserves stored dynamic client info when tokens exist", async () => {
     mocks.sdkAuth.mockImplementationOnce(async (provider) => {
-      expect(await provider.clientInformation()).toEqual({ client_id: "stored-client", client_secret: "stored-secret", redirect_uris: ["http://localhost:19876/callback"] });
+      expect(await provider.clientInformation()).toEqual({ client_id: "stored-client", client_secret: "stored-secret", redirect_uris: ["http://127.0.0.1:19876/callback"] });
       await provider.redirectToAuthorization(new URL("https://auth.example.com/authorize"));
       return "REDIRECT";
     });
@@ -572,7 +602,7 @@ describe("mcp-auth-flow explicit auth", () => {
     updateClientInfo("tokened", {
       clientId: "stored-client",
       clientSecret: "stored-secret",
-      redirectUris: ["http://localhost:19876/callback"],
+      redirectUris: ["http://127.0.0.1:19876/callback"],
     }, "https://api.example.com/mcp");
     updateTokens("tokened", { accessToken: "access", refreshToken: "refresh" }, "https://api.example.com/mcp");
 
@@ -669,7 +699,7 @@ describe("mcp-auth-flow explicit auth", () => {
     expect(result.authorizationUrl).toBe("https://auth.example.com/authorize");
     const stored = getAuthForUrl("missing-redirect-metadata", "https://api.example.com/mcp");
     expect(stored?.clientInfo?.clientId).toBe("fresh-client");
-    expect(stored?.clientInfo?.redirectUris).toEqual(["http://localhost:19876/callback"]);
+    expect(stored?.clientInfo?.redirectUris).toEqual(["http://127.0.0.1:19876/callback"]);
     expect(stored?.tokens).toBeUndefined();
   });
 
@@ -703,7 +733,7 @@ describe("mcp-auth-flow explicit auth", () => {
     expect(result.authorizationUrl).toBe("https://auth.example.com/authorize");
     const stored = getAuthForUrl("malformed-redirect-metadata", "https://api.example.com/mcp");
     expect(stored?.clientInfo?.clientId).toBe("fresh-client");
-    expect(stored?.clientInfo?.redirectUris).toEqual(["http://localhost:19876/callback"]);
+    expect(stored?.clientInfo?.redirectUris).toEqual(["http://127.0.0.1:19876/callback"]);
     expect(stored?.tokens).toBeUndefined();
   });
 
@@ -947,6 +977,25 @@ describe("mcp-auth-flow explicit auth", () => {
     expect(onAuthorizationUrl).toHaveBeenCalledWith(authorizationUrl);
     expect(consoleLog).not.toHaveBeenCalled();
     expect(mocks.open).toHaveBeenCalledWith(authorizationUrl);
+  });
+
+  it("does not launch a second browser when the custom URL handler opened it", async () => {
+    const authorizationUrl = "https://auth.example.com/authorize?client_id=handled";
+    mocks.sdkAuth.mockImplementationOnce(async (provider) => {
+      await provider.redirectToAuthorization(new URL(authorizationUrl));
+      return "REDIRECT";
+    });
+    mocks.waitForCallback.mockResolvedValueOnce("manual-code");
+    const onAuthorizationUrl = vi.fn(async () => true);
+    const { authenticate } = await import("../mcp-auth-flow.ts");
+
+    await expect(authenticate("handled-ui-auth", "https://api.example.com/mcp", {
+      url: "https://api.example.com/mcp",
+      auth: "oauth",
+    }, { onAuthorizationUrl })).resolves.toBe("authenticated");
+
+    expect(onAuthorizationUrl).toHaveBeenCalledWith(authorizationUrl);
+    expect(mocks.open).not.toHaveBeenCalled();
   });
 
   it("reuses a pending manual OAuth flow instead of starting a new one", async () => {

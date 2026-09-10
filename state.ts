@@ -53,6 +53,7 @@ export interface McpExtensionState {
   uiServer: UiServerHandle | null;
   completedUiSessions: CompletedUiSession[];
   openBrowser: (url: string) => Promise<void>;
+  copyText: (text: string) => Promise<void>;
   ui?: ExtensionContext["ui"];
   sendMessage?: SendMessageFn;
   onToolMetadataUpdated?: (serverName: string, reason: string) => void | Promise<void>;

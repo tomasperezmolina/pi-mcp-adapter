@@ -140,10 +140,14 @@ function createState() {
     uiServer: null,
     completedUiSessions: [],
     openBrowser: vi.fn(),
+    copyText: vi.fn(),
   } as any;
 }
 
-function createPi(options: { unregisterTool?: false | ((name: string) => boolean) } = {}) {
+function createPi(options: {
+  unregisterTool?: false | ((name: string) => boolean);
+  flags?: Record<string, unknown>;
+} = {}) {
   const handlers = new Map<string, (...args: any[]) => unknown>();
   let activeTools = ["bash", "mcp", "demo_search"];
   const unregisterTool =
@@ -156,6 +160,7 @@ function createPi(options: { unregisterTool?: false | ((name: string) => boolean
       registerTool: vi.fn(),
       ...(unregisterTool ? { unregisterTool } : {}),
       registerFlag: vi.fn(),
+      getFlag: vi.fn((name: string) => options.flags?.[name]),
       registerCommand: vi.fn(),
       on: vi.fn((event: string, handler: (...args: any[]) => unknown) => {
         handlers.set(event, handler);
@@ -1293,6 +1298,60 @@ describe("mcpAdapter session lifecycle", () => {
     expect(mocks.loadMcpConfig).toHaveBeenCalledWith("/argv.json");
   });
 
+  it("applies the process argv project opt-in during early config loading", async () => {
+    const originalArgv = process.argv;
+    process.argv = [...originalArgv, "--mcp-project-config"];
+    mocks.getConfigPathFromArgv.mockReturnValue(undefined);
+    mocks.loadMcpConfig.mockClear();
+
+    try {
+      const { default: mcpAdapter } = await import("../index.ts");
+      mcpAdapter(createPi().api);
+
+      expect(mocks.loadMcpConfig).toHaveBeenCalledWith(
+        undefined,
+        process.cwd(),
+        { projectConfigDiscovery: "on" },
+      );
+    } finally {
+      process.argv = originalArgv;
+    }
+  });
+
+  it("passes the registered one-run project opt-in through initialization and project override writes", async () => {
+    const state = createState();
+    state.config = {
+      settings: { projectConfigDiscovery: "on" },
+      mcpServers: { project: { command: "project", disabled: true } },
+    };
+    mocks.initializeMcp.mockResolvedValue(state);
+
+    const { default: mcpAdapter } = await import("../index.ts");
+    const { api, handlers } = createPi({ flags: { "mcp-project-config": true } });
+    mcpAdapter(api);
+    const ui = { notify: vi.fn() };
+    const ctx = { hasUI: true, ui, cwd: "/tmp/project" };
+    await handlers.get("session_start")?.({}, ctx);
+    await Promise.resolve();
+
+    expect(mocks.initializeMcp).toHaveBeenCalledWith(
+      api,
+      ctx,
+      expect.any(Object),
+      expect.objectContaining({ projectConfigDiscovery: "on" }),
+    );
+
+    const commandDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp")?.[1];
+    await commandDef.handler("enable project", ctx);
+    expect(mocks.writeProjectServerDisabledOverride).toHaveBeenCalledWith(
+      undefined,
+      "/tmp/project",
+      "project",
+      false,
+      { projectConfigDiscovery: "on" },
+    );
+  });
+
   it("uses status notifications instead of ambient panels in memory-config mode", async () => {
     const state = createState();
     mocks.initializeMcp.mockResolvedValue(state);
@@ -1805,9 +1864,41 @@ describe("mcpAdapter session lifecycle", () => {
     const commandDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp")?.[1];
     const ui = { notify: vi.fn() };
     await commandDef.handler("disable global", { hasUI: true, cwd: "/tmp/project", ui });
-    expect(mocks.writeProjectServerDisabledOverride).toHaveBeenCalledWith(undefined, "/tmp/project", "global", true);
+    expect(mocks.writeProjectServerDisabledOverride).toHaveBeenCalledWith(
+      undefined,
+      "/tmp/project",
+      "global",
+      true,
+      { projectConfigDiscovery: "on" },
+    );
     await commandDef.handler("disable missing", { hasUI: true, cwd: "/tmp/project", ui });
     expect(ui.notify).toHaveBeenCalledWith("Server \"missing\" not found in effective config", "error");
+  });
+
+  it("refuses inactive project enable and disable overrides when project discovery is off", async () => {
+    const state = createState();
+    state.config = {
+      settings: { projectConfigDiscovery: "off" },
+      mcpServers: { global: { url: "https://example.test/mcp" } },
+    };
+    mocks.initializeMcp.mockResolvedValue(state);
+
+    const { default: mcpAdapter } = await import("../index.ts");
+    const { api, handlers } = createPi();
+    mcpAdapter(api);
+    await handlers.get("session_start")?.({}, { hasUI: true, cwd: "/tmp/project", ui: { notify: vi.fn() } });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const commandDef = api.registerCommand.mock.calls.find((call: any[]) => call[0] === "mcp")?.[1];
+    const ui = { notify: vi.fn() };
+    await commandDef.handler("disable global", { hasUI: true, cwd: "/tmp/project", ui });
+
+    expect(mocks.writeProjectServerDisabledOverride).not.toHaveBeenCalled();
+    expect(ui.notify).toHaveBeenCalledWith(
+      "/mcp disable is unavailable while project MCP discovery is off; edit a user-global MCP config instead",
+      "info",
+    );
   });
 
   it("shows usage for `/mcp logout` without a server", async () => {
@@ -1900,6 +1991,8 @@ describe("mcpAdapter session lifecycle", () => {
       expect.any(Object),
       expect.any(AbortSignal),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      state.openBrowser,
+      state.copyText,
     );
     expect(mocks.reconnectServer).toHaveBeenCalledWith(state, expect.any(Object), "github");
     expect(mocks.openMcpAuthPanel).not.toHaveBeenCalled();
@@ -1929,6 +2022,8 @@ describe("mcpAdapter session lifecycle", () => {
       expect.any(Object),
       expect.any(AbortSignal),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      state.openBrowser,
+      state.copyText,
     );
     expect(mocks.reconnectServer).not.toHaveBeenCalled();
     expect(mocks.openMcpAuthPanel).not.toHaveBeenCalled();

@@ -3,7 +3,7 @@ import { UrlElicitationRequiredError, type Client } from "@modelcontextprotocol/
 import type { McpExtensionState } from "./state.ts";
 import type { DirectToolSpec, McpConfig, McpContent, ToolPrefix } from "./types.ts";
 import type { MetadataCache } from "./metadata-cache.ts";
-import { lazyConnect, getFailureAgeSeconds, clearFailure } from "./init.ts";
+import { lazyConnect, getFailureAgeSeconds, clearFailure, updateStatusBar } from "./init.ts";
 import { abortable, throwIfAborted } from "./abort.ts";
 import { isServerCacheValid, parseDirectToolSelectors } from "./metadata-cache.ts";
 export { getMissingConfiguredDirectToolServers } from "./metadata-cache.ts";
@@ -15,7 +15,8 @@ import { createToolSelectorCandidateIndex, formatToolName, getToolNameCandidates
 import { isUiToolVisibleToModel } from "./ui-tool-visibility.ts";
 import { resourceNameToToolName } from "./resource-tools.ts";
 import { authenticate, supportsOAuth } from "./mcp-auth-flow.ts";
-import { formatAuthRequiredMessage, normalizeToolArguments, resolveServerUrl } from "./utils.ts";
+import { createInteractiveOAuthHandlers } from "./mcp-auth-ui.ts";
+import { formatAuthRequiredMessage, formatMcpStatus, normalizeToolArguments, resolveServerUrl } from "./utils.ts";
 import { SessionRecoveryAuthRequiredError, withSessionRecovery } from "./session-recovery.ts";
 import { combineAbortSignals, isAbortError } from "./runtime-owner.ts";
 import { ensureToolCallApproved } from "./tool-approval.ts";
@@ -138,22 +139,23 @@ async function attemptDirectAutoAuth(
     };
   }
 
+  if (state.ui) {
+    state.ui.setStatus("mcp", formatMcpStatus(state.config, `authenticating ${serverName}...`));
+  }
   try {
-    if (state.authStorageOptions) {
-      await authenticate(
-        serverName,
-        serverUrl,
-        definition,
-        signal
-          ? { authStorageOptions: state.authStorageOptions, signal, runtime: state.oauthRuntime }
-          : { authStorageOptions: state.authStorageOptions, runtime: state.oauthRuntime },
-      );
-    } else {
-      await authenticate(serverName, serverUrl, definition, {
-        ...(signal ? { signal } : {}),
-        runtime: state.oauthRuntime,
-      });
-    }
+    await authenticate(serverName, serverUrl, definition, {
+      ...(state.authStorageOptions ? { authStorageOptions: state.authStorageOptions } : {}),
+      ...(state.ui
+        ? createInteractiveOAuthHandlers(serverName, {
+            ui: state.ui,
+            openBrowser: state.openBrowser,
+            copyText: state.copyText,
+            manualCallbackFallback: state.config.settings?.manualOAuthCallbackFallback !== false,
+          })
+        : {}),
+      ...(signal ? { signal } : {}),
+      ...(state.oauthRuntime ? { runtime: state.oauthRuntime } : {}),
+    });
     return { status: "success" };
   } catch (error) {
     if (isAbortError(error, signal)) throw error;
@@ -162,6 +164,8 @@ async function attemptDirectAutoAuth(
       status: "failed",
       message: getDirectAuthFailedMessage(state, serverName, message),
     };
+  } finally {
+    updateStatusBar(state);
   }
 }
 
@@ -324,7 +328,7 @@ export function buildProxyDescription(config: McpConfig): string {
   desc += `  mcp({ connect: "server-name" })       → Connect to a server and refresh metadata\n`;
   desc += `  mcp({ tool: "name", args: { key: "value" } })         → Call a tool (object args; JSON string also accepted)\n`;
   desc += `  mcp({ action: "ui-messages" })        → Retrieve accumulated messages from completed UI sessions\n`;
-  desc += `  mcp({ action: "auth-start", server: "name" })      → Start manual OAuth and get a browser URL\n`;
+  desc += `  mcp({ action: "auth-start", server: "name" })      → Authenticate (interactive auto-flow or headless URL handoff)\n`;
   desc += `  mcp({ action: "auth-complete", server: "name", args: { redirectUrl: "..." } }) → Complete manual OAuth\n`;
   desc += `\nMode: action > tool (call) > connect > describe > instructions > search > server (list) > nothing (status)`;
 

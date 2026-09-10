@@ -1,6 +1,6 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { copyToClipboard, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { McpExtensionState } from "./state.ts";
-import { formatToolName, isServerDisabled, resolveToolPrefix, type McpAdapterOptions, type PromptMetadata, type ToolMetadata, type ToolSelectorCandidateIndex } from "./types.ts";
+import { formatToolName, isServerDisabled, resolveToolPrefix, type McpAdapterOptions, type ProjectConfigDiscovery, type PromptMetadata, type ToolMetadata, type ToolSelectorCandidateIndex } from "./types.ts";
 import { existsSync } from "node:fs";
 import { cloneMcpConfig, loadMcpConfig } from "./config.ts";
 import { ConsentManager } from "./consent-manager.ts";
@@ -98,6 +98,7 @@ export function isTuiMode(ctx: Pick<ExtensionContext, "hasUI" | "mode">): boolea
 type McpInitializationOptions = McpAdapterOptions & {
   oauthRuntime?: McpOAuthRuntime;
   statusEvents?: McpExtensionState["statusEvents"];
+  projectConfigDiscovery?: ProjectConfigDiscovery;
 };
 
 export async function initializeMcp(
@@ -119,9 +120,17 @@ export async function initializeMcp(
   const initialSignal = ctx.signal;
   const ui = rawUi ? createOwnedUi(rawUi, owner) : undefined;
   const runtimeSignal = combineAbortSignals(owner.signal, initialSignal);
+  const projectConfigDiscovery = options.config !== undefined
+    ? undefined
+    : options.projectConfigDiscovery
+      ?? (pi.getFlag("mcp-project-config") === true ? "on" : undefined);
   const config = options.config !== undefined
     ? cloneMcpConfig(options.config)
-    : loadMcpConfig(configPath, cwd);
+    : loadMcpConfig(
+      configPath,
+      cwd,
+      projectConfigDiscovery !== undefined ? { projectConfigDiscovery } : {},
+    );
   const authStorageOptions = getAuthStorageOptions(config.settings?.oauthDir, cwd);
 
   const ownsOAuthRuntime = options.oauthRuntime === undefined;
@@ -186,6 +195,11 @@ export async function initializeMcp(
     openBrowser: async (url: string) => {
       owner.throwIfInactive();
       await openUrl(pi, url, process.env.BROWSER, owner.signal);
+      owner.throwIfInactive();
+    },
+    copyText: async (text: string) => {
+      owner.throwIfInactive();
+      await copyToClipboard(text);
       owner.throwIfInactive();
     },
     ...(ui !== undefined ? { ui } : {}),
@@ -642,6 +656,7 @@ export async function lazyConnect(state: McpExtensionState, serverName: string, 
   throwIfAborted(ownedSignal);
   const connection = state.manager.getConnection(serverName);
   if (connection?.status === "needs-auth") {
+    updateStatusBar(state);
     return false;
   }
   if (connection?.status === "connected") {
@@ -664,6 +679,7 @@ export async function lazyConnect(state: McpExtensionState, serverName: string, 
     }
     const newConnection = await state.manager.connect(serverName, definition, ownedSignal);
     if (newConnection.status === "needs-auth") {
+      updateStatusBar(state);
       return false;
     }
     updateServerMetadata(state, serverName);

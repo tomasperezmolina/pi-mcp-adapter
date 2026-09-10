@@ -71,7 +71,20 @@ Precedence is (later entries win):
 5. `.mcp.json`
 6. `.pi/mcp.json`
 
-`/mcp disable <server>` and `/mcp enable <server>` persist only the `disabled` field in the project-local `.pi/mcp.json`, which is the highest-precedence Pi layer. Enabling removes the project flag when lower layers are enabled, or writes `false` when needed to override a disabled lower source. This applies even when the effective server came from a shared global/project file, an imported host config, or `configPath`; the source file is never rewritten and credentials are never copied. Run `/reload` after changing the flag so registered tool surfaces are refreshed. The manual equivalent is to add `{ "disabled": true }` to a server in any normal MCP config. Supplied in-memory `createMcpAdapter({ config })` configurations are isolated and do not read or write this project override; the commands are unavailable in that mode.
+Project sources participate only when `settings.projectConfigDiscovery` is `"on"` (the compatibility default). To ignore repository-provided MCP configuration everywhere, set this in a user-global MCP file:
+
+```json
+{
+  "settings": {
+    "projectConfigDiscovery": "off"
+  },
+  "mcpServers": {}
+}
+```
+
+The policy is resolved from user-global sources only; `.mcp.json` and `.pi/mcp.json` cannot opt themselves back in. `"off"` also excludes repository-scoped compatibility sources such as project `opencode.json` and `.vscode/mcp.json`, while preserving their user-global counterparts. Start one Pi invocation with `--mcp-project-config` to opt in explicitly for that run. `/mcp setup` reports detected project MCP files as inactive without parsing their server definitions.
+
+`/mcp disable <server>` and `/mcp enable <server>` persist only the `disabled` field in the project-local `.pi/mcp.json`, which is the highest-precedence Pi layer. Enabling removes the project flag when lower layers are enabled, or writes `false` when needed to override a disabled lower source. This applies even when the effective server came from a shared global/project file, an imported host config, or `configPath`; the source file is never rewritten and credentials are never copied. Run `/reload` after changing the flag so registered tool surfaces are refreshed. The manual equivalent is to add `{ "disabled": true }` to a server in any normal MCP config. These commands are unavailable while `projectConfigDiscovery` is `"off"`, because their project-local writes would be inactive; edit a user-global MCP file instead. Supplied in-memory `createMcpAdapter({ config })` configurations are isolated and do not read or write this project override; the commands are unavailable in that mode.
 
 Servers are **lazy by default** — they won't connect until you actually call one of their tools. The adapter caches tool metadata so search and describe work without live connections.
 
@@ -332,17 +345,17 @@ The adapter owns only its client socket and closes that connection when the Pi r
 
 ### Remote/headless OAuth
 
-If Pi is running on a remote server, `/mcp-auth <server>` shows a clickable authorization URL first. Open it in your local browser and approve access, then select **Yes** in Pi to open the callback input. The browser may fail to load the localhost callback page because localhost refers to your workstation; copy the full URL from its address bar and paste it into Pi. The authorization screen closes automatically instead when the browser can reach Pi's callback directly.
+In an interactive local session, `/mcp-auth <server>` opens the authorization URL through Pi and waits for the localhost callback without covering the terminal with an input screen. With the default `manualOAuthCallbackFallback: true`, Pi offers pasted callback input immediately if browser launch fails or after 10 seconds without a callback. Set it to `false` when localhost ports are forwarded reliably; every interactive entry point then waits only for automatic callback delivery and never requests a copied browser URL.
 
-The same flow is available through the proxy tool for non-interactive clients. Persistent OAuth still requires an available OS credential store; on headless Linux that usually means an unlocked Secret Service/libsecret keyring. The adapter fails closed instead of falling back to plaintext credentials when the secure store is unavailable.
+With `autoAuth: true`, interactive proxy/direct calls and interactive `auth-start` use the same complete browser flow. For non-interactive clients, `auth-start` remains a two-phase URL handoff: Persistent OAuth still requires an available OS credential store; on headless Linux that usually means an unlocked Secret Service/libsecret keyring. The adapter fails closed instead of falling back to plaintext credentials when the secure store is unavailable.
 
-On Linux, if credential access fails because Pi inherited a revoked session keyring, the adapter uses a best-effort recovery path through `keyctl session - node <packaged helper>` so explicit re-authentication can write fresh credentials without killing a long-lived tmux server. This path requires `keyctl` and `node` on `PATH`; missing, locked, or otherwise unavailable credential stores still fail closed.
+On Linux, if credential access fails because Pi inherited a revoked session keyring, the adapter uses a best-effort recovery path through `keyctl session pi-mcp-adapter.oauth node <packaged helper>` so explicit re-authentication can write fresh credentials without killing a long-lived tmux server. This path requires `keyctl` and `node` on `PATH`; missing, locked, or otherwise unavailable credential stores still fail closed.
 
 ```js
 mcp({ action: "auth-start", server: "linear-server" })
 ```
 
-Open the returned authorization URL in your local browser. After approval, your browser redirects to a localhost URL. On a remote server that local page may fail to load; copy the full URL from the browser address bar anyway and complete the flow in the same Pi session:
+Open the returned authorization URL in your local browser. After approval, your browser redirects to a localhost URL. When the non-interactive caller cannot receive a forwarded callback, copy the full URL from the browser address bar and complete the flow in the same Pi session:
 
 ```js
 mcp({
@@ -380,6 +393,9 @@ When any enabled server uses `eager` or `keep-alive`, initialization also starts
     "notifyOnStartupConnect": true,
     "warnOnLargeDirectTools": true,
     "hostConfigDiscovery": "off",
+    "projectConfigDiscovery": "on",
+    "autoAuth": false,
+    "manualOAuthCallbackFallback": true,
     "approveTools": ["github_delete_*", "notion_update_*"],
     "oauthDir": ".pi/mcp-oauth",
     "trace": {
@@ -404,6 +420,7 @@ When any enabled server uses `eager` or `keep-alive`, initialization also starts
 | `collapsedResultLines` | Number of result text lines to show before expansion: `1`, `2`, or `3`. Defaults to `1` in compact mode and `3` in boxed mode. |
 | `notifyOnStartupConnect` | Show successful startup connection notices (default: `true`). Set to `false` to suppress routine `MCP: N servers connected (M tools)` notices. Connection errors and authentication warnings remain visible. |
 | `hostConfigDiscovery` | Host-specific config policy: `"off"` (default), `"prompt"` (detect/report only), or `"on"` (explicitly load detected host configs as the lowest-precedence fallback) |
+| `projectConfigDiscovery` | Project MCP config policy: `"on"` (compatibility default) loads repository sources; `"off"` ignores them. This policy is user-owned and project files cannot override it. Use `--mcp-project-config` for a one-run opt-in. |
 | `agentPluginPaths` | Agent Plugins package directories to load MCP servers from. Relative paths resolve from the active project cwd. |
 | `approveTools` | `true` to require approval before every MCP tool call, or an array of glob patterns such as `["github_delete_*", "notion_update_*"]`. Per-server `approveTools` overrides this. |
 | `oauthDir` | Legacy OAuth `tokens.json` import directory for this MCP config. Relative paths resolve from the active project cwd. `MCP_OAUTH_DIR` still wins when set. Persistent OAuth credentials are stored in the OS credential store, not this directory. |
@@ -415,7 +432,8 @@ When any enabled server uses `eager` or `keep-alive`, initialization also starts
 | `freezeDirectTools` | Keep direct-tool registration stable after the initial sync so metadata updates and explicit reconnects do not rebuild the system prompt. Proxy/search/cache metadata still refreshes. Default: false. |
 | `scriptMode` | Register the MCP-only `mcpScript` plain-JavaScript tool (default: true). Set to `false` to hide it. |
 | `disableProxyTool` | Hide the `mcp` proxy tool once configured direct tools are fully available from cache. |
-| `autoAuth` | Auto-run OAuth on `connect`/tool calls when a server needs auth, then retry once (default: false). |
+| `autoAuth` | Auto-run OAuth on `connect`/tool calls when a server needs auth, then retry once (default: false). In interactive sessions, explicit `auth-start` uses the same complete browser flow when this is enabled. |
+| `manualOAuthCallbackFallback` | Offer pasted callback URL input if automatic localhost delivery does not arrive (default: true). Set to `false` when localhost ports are forwarded reliably; Pi then waits only for the callback and never asks for a copied browser URL. |
 | `sampling` | Allow MCP servers to sample through Pi models, honoring `modelPreferences.hints` before current/default fallback (default: true when UI approval is available). |
 | `samplingAutoApprove` | Skip sampling confirmation prompts. Required for sampling in non-UI sessions (default: false). |
 | `elicitation` | Allow MCP servers to request user input through Pi dialogs (default: true when Pi UI is available). |
@@ -783,9 +801,9 @@ Servers that provide usage guidance via the MCP `instructions` field surface it 
 | `/mcp-auth` | Open an OAuth server picker in interactive UI sessions |
 | `/mcp-auth <server>` | OAuth setup for a specific server |
 
-If `settings.autoAuth` is `true`, `mcp({ connect: ... })`, `mcp({ tool: ... })`, and direct tool calls automatically run OAuth when needed and retry once.
+If `settings.autoAuth` is `true`, `mcp({ connect: ... })`, `mcp({ tool: ... })`, direct tool calls, and interactive `auth-start` actions use the same complete Pi browser flow. Connect and tool calls retry once after authorization. By default, this flow offers pasted callback input after 10 seconds; set `settings.manualOAuthCallbackFallback` to `false` when localhost ports are forwarded reliably so Pi waits only for automatic callback delivery.
 
-In interactive sessions, you can also authenticate from `/mcp` with `ctrl+a` or Enter on a server that needs auth. In remote/headless sessions, use the proxy tool's `auth-start` and `auth-complete` actions to copy the authorization URL locally and paste the redirect URL back into Pi. `/mcp-auth` without a server only opens a picker in the interactive UI.
+In interactive sessions, you can also authenticate from `/mcp` with `ctrl+a` or Enter on a server that needs auth. Non-UI `auth-start` and `auth-complete` retain the two-phase copy/paste protocol for genuinely headless callers. `/mcp-auth` without a server only opens a picker in the interactive UI.
 
 ### MCP output schemas
 

@@ -49,7 +49,8 @@ export interface McpOAuthRuntime {
 }
 
 export interface AuthenticateOptions {
-  onAuthorizationUrl?: (authorizationUrl: string) => void | Promise<void>
+  /** Return exactly true when the URL handoff is owned and the generic browser opener must be suppressed. */
+  onAuthorizationUrl?: (authorizationUrl: string) => boolean | void | Promise<boolean | void>
   onAuthorizationInput?: (
     authorizationUrl: string,
     signal: AbortSignal,
@@ -87,7 +88,14 @@ type RuntimeState = {
   pendingAuths: Map<string, PendingAuth>
   pendingAuthStates: Map<string, string>
   pendingAuthCleanupTimers: Map<string, ReturnType<typeof setTimeout>>
-  pendingAuthentications: Map<string, Promise<AuthStatus>>
+  pendingAuthentications: Map<string, PendingAuthentication>
+}
+
+type PendingAuthentication = {
+  promise: Promise<AuthStatus>
+  controller: AbortController
+  waiters: number
+  settled: boolean
 }
 
 const runtimeStates = new WeakMap<McpOAuthRuntime, RuntimeState>()
@@ -353,7 +361,7 @@ function parseOAuthRedirectUri(redirectUri: string): OAuthRedirectTarget {
     throw new Error("OAuth localhost redirectUri must include an explicit numeric port")
   }
 
-  const callbackHost = hostname === "[::1]" ? "::1" : hostname
+  const callbackHost = hostname === "[::1]" || hostname === "::1" ? "::1" : hostname
   return { mode: "local", port, callbackHost, callbackPath: url.pathname }
 }
 
@@ -842,14 +850,22 @@ export async function authenticate(
   const runtime = getRuntime(options)
   const runtimeState = getRuntimeState(runtime)
   const authStorageOptions = options.authStorageOptions ?? {}
-  const signal = combineAbortSignals(runtime.signal, options.signal)
-  throwIfAborted(signal)
+  const callerSignal = combineAbortSignals(runtime.signal, options.signal)
+  throwIfAborted(callerSignal)
   const authKey = `${serverName}|${serverUrl}|${getAuthBaseDir(authStorageOptions)}`
-  const inFlight = runtimeState.pendingAuthentications.get(authKey)
-  if (inFlight) {
-    return inFlight
+  const existing = runtimeState.pendingAuthentications.get(authKey)
+  if (existing) {
+    existing.waiters++
+    try {
+      return await abortable(existing.promise, callerSignal)
+    } finally {
+      existing.waiters--
+      if (existing.waiters === 0 && !existing.settled) existing.controller.abort()
+    }
   }
 
+  const sharedController = new AbortController()
+  const signal = combineAbortSignals(runtime.signal, sharedController.signal)
   const operation = (async (): Promise<AuthStatus> => {
     const { authorizationUrl } = await startAuth(serverName, serverUrl, definition, {
       ...options,
@@ -891,16 +907,19 @@ export async function authenticate(
 
       // Open browser. Always surface the URL first so remote/headless users can copy it
       // even when the OS browser handoff is unavailable or invisible.
+      let authorizationUrlHandled = false
       if (options.onAuthorizationUrl) {
-        await abortable(Promise.resolve(options.onAuthorizationUrl(authorizationUrl)), signal)
+        authorizationUrlHandled = await abortable(Promise.resolve(options.onAuthorizationUrl(authorizationUrl)), signal) === true
       } else {
         console.log(`MCP Auth: Open this URL to authenticate ${serverName}:\n${authorizationUrl}`)
       }
-      try {
-        await abortable(open(authorizationUrl), signal)
-      } catch (error) {
-        if (isAbortError(error, signal)) throw error
-        console.warn(`MCP Auth: Failed to open browser for ${serverName}; waiting for manual callback`, { error })
+      if (!authorizationUrlHandled) {
+        try {
+          await abortable(open(authorizationUrl), signal)
+        } catch (error) {
+          if (isAbortError(error, signal)) throw error
+          console.warn(`MCP Auth: Failed to open browser for ${serverName}; waiting for manual callback`, { error })
+        }
       }
 
       const authorizationResponse = await waitForAuthorizationResponse(
@@ -934,14 +953,25 @@ export async function authenticate(
     }
   })()
 
-  runtimeState.pendingAuthentications.set(authKey, operation)
-
-  try {
-    return await operation
-  } finally {
-    if (runtimeState.pendingAuthentications.get(authKey) === operation) {
+  const pending: PendingAuthentication = {
+    promise: operation,
+    controller: sharedController,
+    waiters: 1,
+    settled: false,
+  }
+  runtimeState.pendingAuthentications.set(authKey, pending)
+  void operation.finally(() => {
+    pending.settled = true
+    if (runtimeState.pendingAuthentications.get(authKey) === pending) {
       runtimeState.pendingAuthentications.delete(authKey)
     }
+  }).catch(() => {})
+
+  try {
+    return await abortable(operation, callerSignal)
+  } finally {
+    pending.waiters--
+    if (pending.waiters === 0 && !pending.settled) pending.controller.abort()
   }
 }
 

@@ -144,6 +144,25 @@ describe("authenticateServer", () => {
     }
   });
 
+  it("clears authentication status when OAuth is cancelled", async () => {
+    const controller = new AbortController();
+    mocks.authenticate.mockImplementationOnce(async () => {
+      controller.abort();
+      throw controller.signal.reason;
+    });
+    const ui = { notify: vi.fn(), setStatus: vi.fn() };
+    const { authenticateServer } = await import("../commands.ts");
+
+    await expect(authenticateServer("sentry", {
+      mcpServers: { sentry: { url: "https://mcp.sentry.dev/mcp", auth: "oauth" } },
+    }, { hasUI: true, mode: "tui", ui } as any, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(ui.setStatus.mock.calls).toEqual([
+      ["mcp-auth", "Authenticating sentry..."],
+      ["mcp-auth", undefined],
+    ]);
+  });
+
   it("fails OAuth authentication before requests when URL variables are missing", async () => {
     const originalUrl = process.env.MCP_AUTH_URL;
     delete process.env.MCP_AUTH_URL;
@@ -207,12 +226,115 @@ describe("authenticateServer", () => {
     );
   });
 
-  it("puts the OAuth link in the paste prompt without a confirmation", async () => {
+  it("opens the OAuth URL through Pi and waits without blocking the TUI when browser launch succeeds", async () => {
+    const authorizationUrl = "https://auth.example.com/authorize?resource=https%3A%2F%2Fmcp.sentry.dev%2Fmcp";
+    const inputController = new AbortController();
+    mocks.authenticate.mockImplementationOnce(async (_name, _url, _definition, options) => {
+      expect(await options.onAuthorizationUrl(authorizationUrl)).toBe(true);
+      const pendingInput = options.onAuthorizationInput(authorizationUrl, inputController.signal);
+      await Promise.resolve();
+      inputController.abort();
+      await expect(pendingInput).resolves.toBeUndefined();
+      return "authenticated";
+    });
+    const ui = {
+      notify: vi.fn(),
+      setStatus: vi.fn(),
+      confirm: vi.fn(),
+      input: vi.fn(),
+    };
+    const openBrowser = vi.fn().mockResolvedValue(undefined);
+    const copyText = vi.fn(() => new Promise<void>(() => {}));
+    const { authenticateServer } = await import("../commands.ts");
+
+    const result = await authenticateServer("sentry", {
+      mcpServers: {
+        sentry: { url: "https://mcp.sentry.dev/mcp", auth: "oauth" },
+      },
+    }, { hasUI: true, ui } as any, undefined, undefined, openBrowser, copyText);
+
+    expect(result.ok).toBe(true);
+    expect(openBrowser).toHaveBeenCalledWith(authorizationUrl);
+    expect(ui.confirm).not.toHaveBeenCalled();
+    expect(ui.input).not.toHaveBeenCalled();
+  });
+
+  it("waits only for the forwarded callback when manual callback fallback is disabled", async () => {
+    const authorizationUrl = "https://auth.example.com/authorize?client_id=forwarded";
+    mocks.authenticate.mockImplementationOnce(async (_name, _url, _definition, options) => {
+      expect(options.onAuthorizationInput).toBeUndefined();
+      expect(await options.onAuthorizationUrl(authorizationUrl)).toBe(true);
+      return "authenticated";
+    });
+    const ui = {
+      notify: vi.fn(),
+      setStatus: vi.fn(),
+      confirm: vi.fn(),
+      input: vi.fn(),
+    };
+    const openBrowser = vi.fn().mockResolvedValue(undefined);
+    const { authenticateServer } = await import("../commands.ts");
+
+    const result = await authenticateServer("sentry", {
+      settings: { manualOAuthCallbackFallback: false },
+      mcpServers: {
+        sentry: { url: "https://mcp.sentry.dev/mcp", auth: "oauth" },
+      },
+    }, { hasUI: true, ui } as any, undefined, undefined, openBrowser);
+
+    expect(result.ok).toBe(true);
+    expect(openBrowser).toHaveBeenCalledWith(authorizationUrl);
+    expect(ui.confirm).not.toHaveBeenCalled();
+    expect(ui.input).not.toHaveBeenCalled();
+    expect(ui.notify).toHaveBeenCalledWith(
+      expect.not.stringContaining("paste it into Pi"),
+      "info",
+    );
+  });
+
+  it("offers manual completion when an opened browser does not deliver a callback", async () => {
+    vi.useFakeTimers();
+    const authorizationUrl = "https://auth.example.com/authorize?client_id=delayed";
+    const callbackUrl = "http://localhost:3118/callback?code=code&state=state";
+    const inputController = new AbortController();
+    let promptWasShown = false;
+    mocks.authenticate.mockImplementationOnce(async (_name, _url, _definition, options) => {
+      expect(await options.onAuthorizationUrl(authorizationUrl)).toBe(true);
+      const pendingInput = options.onAuthorizationInput(authorizationUrl, inputController.signal);
+      await vi.advanceTimersByTimeAsync(10_000);
+      promptWasShown = ui.confirm.mock.calls.length > 0;
+      inputController.abort();
+      await pendingInput;
+      return "authenticated";
+    });
+    const ui = {
+      notify: vi.fn(),
+      setStatus: vi.fn(),
+      confirm: vi.fn(async () => true),
+      input: vi.fn(async () => callbackUrl),
+    };
+    const openBrowser = vi.fn().mockResolvedValue(undefined);
+    const copyText = vi.fn().mockResolvedValue(undefined);
+    const { authenticateServer } = await import("../commands.ts");
+
+    try {
+      await authenticateServer("sentry", {
+        mcpServers: { sentry: { url: "https://mcp.sentry.dev/mcp", auth: "oauth" } },
+      }, { hasUI: true, ui } as any, undefined, undefined, openBrowser, copyText);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(promptWasShown).toBe(true);
+    expect(copyText).toHaveBeenCalledWith(authorizationUrl);
+  });
+
+  it("surfaces the OAuth URL as one terminal hyperlink and accepts a pasted remote callback", async () => {
     const authorizationUrl = "https://auth.example.com/authorize?resource=https%3A%2F%2Fmcp.sentry.dev%2Fmcp";
     const callbackUrl = "http://localhost:3118/callback?code=code&state=state";
     const inputController = new AbortController();
     mocks.authenticate.mockImplementationOnce(async (_name, _url, _definition, options) => {
-      await options.onAuthorizationUrl(authorizationUrl);
+      expect(await options.onAuthorizationUrl(authorizationUrl)).toBe(true);
       const input = await options.onAuthorizationInput(authorizationUrl, inputController.signal);
       expect(input).toBe(callbackUrl);
       return "authenticated";
@@ -223,13 +345,15 @@ describe("authenticateServer", () => {
       confirm: vi.fn(async () => true),
       input: vi.fn(async () => callbackUrl),
     };
+    const openBrowser = vi.fn().mockRejectedValue(new Error("no browser available"));
+    const copyText = vi.fn(() => new Promise<void>(() => {}));
     const { authenticateServer } = await import("../commands.ts");
 
     const result = await authenticateServer("sentry", {
       mcpServers: {
         sentry: { url: "https://mcp.sentry.dev/mcp", auth: "oauth" },
       },
-    }, { hasUI: true, mode: "tui", ui } as any);
+    }, { hasUI: true, ui } as any, undefined, undefined, openBrowser, copyText);
 
     expect(result.ok).toBe(true);
     expect(mocks.authenticate).toHaveBeenCalledWith(
@@ -241,13 +365,24 @@ describe("authenticateServer", () => {
         onAuthorizationInput: expect.any(Function),
       },
     );
-    expect(ui.notify).not.toHaveBeenCalledWith(expect.stringContaining(authorizationUrl), "info");
-    expect(ui.confirm).not.toHaveBeenCalled();
+    expect(openBrowser).toHaveBeenCalledWith(authorizationUrl);
+    expect(copyText).toHaveBeenCalledWith(authorizationUrl);
+    expect(ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining(`\u001B]8;;${authorizationUrl}\u001B\\${authorizationUrl}\u001B]8;;\u001B\\`),
+      "info",
+    );
+    expect(ui.notify).toHaveBeenCalledWith(
+      "Could not open the OAuth URL automatically: no browser available. Pi is also attempting to copy the authorization URL to your clipboard.",
+      "warning",
+    );
+    expect(ui.confirm).toHaveBeenCalledWith(
+      "Authorize sentry",
+      expect.stringContaining(authorizationUrl),
+      { signal: inputController.signal },
+    );
     expect(ui.input).toHaveBeenCalledWith(
-      expect.stringContaining(
-        `\u001B]8;;${authorizationUrl}\u001B\\Open authorization page\u001B]8;;\u001B\\\n${authorizationUrl}`,
-      ),
-      undefined,
+      "Complete sentry OAuth",
+      "Paste the full callback URL",
       { signal: inputController.signal },
     );
   });

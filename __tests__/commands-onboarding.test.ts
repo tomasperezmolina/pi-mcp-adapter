@@ -58,6 +58,7 @@ describe("commands onboarding", () => {
 
   it("opens setup mode when no MCP servers are configured", async () => {
     process.env.HOME = mkdtempSync(join(tmpdir(), "pi-mcp-commands-home-"));
+    const cwd = mkdtempSync(join(tmpdir(), "pi-mcp-commands-project-"));
     const ui = createUi();
     const { openMcpPanel } = await import("../commands.ts");
 
@@ -66,7 +67,7 @@ describe("commands onboarding", () => {
       manager: { getConnection: () => null },
       toolMetadata: new Map(),
       failureTracker: new Map(),
-    } as any, { getFlag: () => undefined } as any, { hasUI: true, mode: "tui", ui } as any);
+    } as any, { getFlag: () => undefined } as any, { hasUI: true, mode: "tui", ui, cwd } as any);
 
     expect(mocks.createMcpSetupPanel).toHaveBeenCalled();
     expect(mocks.createMcpPanel).not.toHaveBeenCalled();
@@ -235,6 +236,35 @@ describe("commands onboarding", () => {
     expect(discovery.hostConfigs).toEqual([]);
     expect(warning).not.toHaveBeenCalled();
     warning.mockRestore();
+  });
+
+  it("writes setup servers to user-global config when project discovery is off", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-commands-policy-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-commands-policy-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+    writeJson(join(home, ".pi", "agent", "mcp.json"), {
+      settings: { projectConfigDiscovery: "off" },
+      mcpServers: {},
+    });
+
+    const ui = createUi();
+    const { openMcpSetup } = await import("../commands.ts");
+    await openMcpSetup(
+      { config: { settings: { projectConfigDiscovery: "off" }, mcpServers: {} } } as any,
+      { getFlag: () => undefined } as any,
+      { hasUI: true, mode: "tui", ui, cwd: project } as any,
+    );
+
+    const callbacks = mocks.createMcpSetupPanel.mock.calls[0]?.[1];
+    const result = await callbacks.addKnownServer({
+      id: "demo",
+      name: "Demo",
+      summary: "Demo server",
+      entry: { command: "demo" },
+    });
+
+    expect(result.path).toBe(join(home, ".config", "mcp", "mcp.json"));
   });
 
   it("clears OAuth credentials, cancels pending auth, and closes the server on logout", async () => {

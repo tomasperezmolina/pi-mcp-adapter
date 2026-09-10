@@ -216,9 +216,14 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   const earlyConfigPath = programmaticConfig
     ? undefined
     : options.configPath ?? getConfigPathFromArgv();
+  const earlyProjectConfigDiscovery = !programmaticConfig && process.argv.includes("--mcp-project-config")
+    ? "on"
+    : undefined;
   const earlyConfig = programmaticConfig
     ? cloneMcpConfig(sessionConfig)
-    : loadMcpConfig(earlyConfigPath);
+    : earlyProjectConfigDiscovery
+      ? loadMcpConfig(earlyConfigPath, process.cwd(), { projectConfigDiscovery: earlyProjectConfigDiscovery })
+      : loadMcpConfig(earlyConfigPath);
   const earlyCache = loadMetadataCache();
   const envRaw = process.env.MCP_DIRECT_TOOLS;
   const envDirectToolOverride = parseEnvDirectToolOverride(envRaw);
@@ -538,9 +543,17 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     description: "Path to MCP config file",
     type: "string",
   });
+  pi.registerFlag("mcp-project-config", {
+    description: "Load MCP configuration from the active project for this invocation",
+    type: "boolean",
+    default: false,
+  });
 
   function startInitialization(ctx: ExtensionContext, owner: McpRuntimeOwner, oauthRuntime: McpOAuthRuntime, generation: number, staleReason: string): Promise<void> {
     owner.addCleanup(() => cleanupMaterializedBinaryResources(owner.signal));
+    const projectConfigDiscovery = !programmaticConfig && pi.getFlag?.("mcp-project-config") === true
+      ? "on"
+      : undefined;
     const promise = initializeMcp(pi, ctx, owner, {
       ...(programmaticConfig || options.configPath !== undefined
         ? {
@@ -548,6 +561,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
             ...(sessionConfig !== undefined ? { config: sessionConfig } : {}),
           }
         : {}),
+      ...(projectConfigDiscovery !== undefined ? { projectConfigDiscovery } : {}),
       oauthRuntime,
     });
     initPromise = promise;
@@ -870,6 +884,13 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
             commandCtx.ui?.notify(`/mcp ${subcommand} is unavailable when config is supplied by createMcpAdapter().`, "info");
             break;
           }
+          if (state.config.settings?.projectConfigDiscovery === "off") {
+            commandCtx.ui?.notify(
+              `/mcp ${subcommand} is unavailable while project MCP discovery is off; edit a user-global MCP config instead`,
+              "info",
+            );
+            break;
+          }
           if (!serverName) {
             commandCtx.ui?.notify(`Usage: /mcp ${subcommand} <server>`, "error");
             break;
@@ -879,7 +900,13 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
             break;
           }
           commandOwner?.throwIfInactive();
-          const result = writeProjectServerDisabledOverride(earlyConfigPath, commandCtx.cwd, serverName, subcommand === "disable");
+          const result = writeProjectServerDisabledOverride(
+            earlyConfigPath,
+            commandCtx.cwd,
+            serverName,
+            subcommand === "disable",
+            { projectConfigDiscovery: state.config.settings?.projectConfigDiscovery ?? "on" },
+          );
           if (result.changed) {
             commandCtx.ui?.notify(`${subcommand === "disable" ? "Disabled" : "Enabled"} server "${serverName}" in ${result.path} — run /reload to apply`, "info");
           } else {
@@ -960,7 +987,15 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         return;
       }
 
-      const result = await authenticateServer(serverName, state.config, commandCtx, commandCtx.signal, state.oauthRuntime);
+      const result = await authenticateServer(
+        serverName,
+        state.config,
+        commandCtx,
+        commandCtx.signal,
+        state.oauthRuntime,
+        state.openBrowser,
+        state.copyText,
+      );
       if (result.ok) {
         commandOwner?.throwIfInactive();
         await reconnectServer(state, commandCtx, serverName);

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added user-owned `settings.projectConfigDiscovery` policy. Set it to `"off"` in global MCP config to ignore repository MCP sources, with `--mcp-project-config` as an explicit one-run opt-in.
+
+### Fixed
+- Unified interactive `/mcp-auth`, automatic auth, and `auth-start` behind the same Pi browser/callback flow when `autoAuth` is enabled. Added `manualOAuthCallbackFallback: false` for installations with forwarded localhost ports that should never request a pasted callback URL, while preserving the two-phase protocol for non-UI callers.
+- Bound dynamic OAuth callbacks to deterministic IPv4 loopback, preventing `localhost` address-family mismatches from leaving dynamic authentication stuck in `connecting`.
+- Reused one named Linux keyring recovery session and batched chunk operations, preventing revoked-session recovery and credential refreshes from exhausting the per-user key quota.
+
 ## [2.32.1] - 2026-09-01
 
 ### Fixed

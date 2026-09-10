@@ -139,6 +139,7 @@
     "mcp-oauth-provider.ts",
     "mcp-callback-server.ts",
     "mcp-auth-flow.ts",
+    "mcp-auth-ui.ts",
     "mcp-panel.ts",
     "panel-keys.ts",
     "mcp-trace.ts",

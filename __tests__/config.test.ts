@@ -66,7 +66,7 @@ describe("config discovery", () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { loadMcpConfig } = await import("../config.ts");
     const config = loadMcpConfig();
-    expect(config.settings).toEqual({ directTools: false });
+    expect(config.settings).toEqual({ directTools: false, projectConfigDiscovery: "on" });
     expect(config.mcpServers.acme_tools__tools).toEqual({
       command: "user-command",
       args: ["--package"],
@@ -512,6 +512,7 @@ describe("config discovery", () => {
       directTools: true,
       autoAuth: true,
       oauthDir: ".pi/oauth",
+      projectConfigDiscovery: "on",
     });
   });
 
@@ -535,6 +536,167 @@ describe("config discovery", () => {
 
     expect(getProjectPiConfigPath(project)).toBe(join(project, ".arc", "mcp.json"));
     expect(config.mcpServers.brandedProject).toMatchObject({ command: "branded" });
+  });
+
+  it("keeps project MCP files inactive when the user-global policy is off", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-project-policy-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-project-policy-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+
+    writeJson(join(home, ".pi", "agent", "mcp.json"), {
+      settings: { projectConfigDiscovery: "off" },
+      mcpServers: { globalOnly: { command: "global" } },
+    });
+    writeJson(join(project, ".mcp.json"), {
+      settings: { projectConfigDiscovery: "on", autoAuth: true },
+      mcpServers: { projectShared: { command: "project-shared" } },
+    });
+    writeJson(join(project, ".pi", "mcp.json"), {
+      settings: { projectConfigDiscovery: "on", directTools: true },
+      mcpServers: { projectPi: { command: "project-pi" } },
+    });
+
+    const { getMcpDiscoverySummary, getServerProvenance, loadMcpConfig } = await import("../config.ts");
+    const config = loadMcpConfig();
+    const discovery = getMcpDiscoverySummary();
+
+    expect(config.mcpServers).toEqual({ globalOnly: { command: "global" } });
+    expect(config.settings).toEqual({ projectConfigDiscovery: "off" });
+    expect(discovery.projectConfigDiscovery).toBe("off");
+    expect(discovery.sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "shared-project", exists: true, active: false, serverCount: 0 }),
+      expect.objectContaining({ id: "pi-project", exists: true, active: false, serverCount: 0 }),
+    ]));
+    expect(getServerProvenance().has("projectShared")).toBe(false);
+    expect(getServerProvenance().has("projectPi")).toBe(false);
+  });
+
+  it("does not parse malformed inactive project MCP sources", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-project-policy-malformed-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-project-policy-malformed-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+
+    writeJson(join(home, ".pi", "agent", "mcp.json"), {
+      settings: { projectConfigDiscovery: "off", hostConfigDiscovery: "on" },
+      imports: ["opencode", "vscode"],
+      mcpServers: { global: { command: "global" } },
+    });
+    for (const path of [
+      join(project, ".mcp.json"),
+      join(project, ".pi", "mcp.json"),
+      join(project, "opencode.json"),
+      join(project, ".vscode", "mcp.json"),
+    ]) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, "{ malformed", "utf-8");
+    }
+
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { getMcpDiscoverySummary, loadMcpConfig } = await import("../config.ts");
+    expect(loadMcpConfig().mcpServers).toEqual({ global: { command: "global" } });
+    const discovery = getMcpDiscoverySummary();
+    expect(discovery.sources.filter((source) => source.scope === "project")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ exists: true, active: false, serverCount: 0 }),
+    ]));
+    expect(discovery.hostConfigs.filter((source) => !source.active)).toHaveLength(2);
+    expect(warning).not.toHaveBeenCalled();
+    warning.mockRestore();
+  });
+
+  it("does not let an active project change the user-owned discovery policy", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-project-policy-owned-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-project-policy-owned-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+
+    writeJson(join(home, ".pi", "agent", "mcp.json"), {
+      settings: { projectConfigDiscovery: "on" },
+      mcpServers: { global: { command: "global" } },
+    });
+    writeJson(join(project, ".mcp.json"), {
+      settings: { projectConfigDiscovery: "off" },
+      mcpServers: { project: { command: "project" } },
+    });
+
+    const { loadMcpConfig } = await import("../config.ts");
+    expect(loadMcpConfig().mcpServers.project).toEqual({ command: "project" });
+    expect(loadMcpConfig().settings?.projectConfigDiscovery).toBe("on");
+  });
+
+  it("warns and preserves compatibility for an invalid user-global project policy", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-project-policy-invalid-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-project-policy-invalid-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+
+    writeJson(join(home, ".pi", "agent", "mcp.json"), {
+      settings: { projectConfigDiscovery: "sometimes" },
+      mcpServers: {},
+    });
+    writeJson(join(project, ".mcp.json"), {
+      mcpServers: { project: { command: "project" } },
+    });
+
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { getMcpDiscoverySummary, loadMcpConfig } = await import("../config.ts");
+    expect(loadMcpConfig().mcpServers.project).toEqual({ command: "project" });
+    expect(loadMcpConfig().settings?.projectConfigDiscovery).toBe("on");
+    expect(getMcpDiscoverySummary().projectConfigDiscovery).toBe("on");
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("settings.projectConfigDiscovery"));
+    warning.mockRestore();
+  });
+
+  it("allows project MCP files for one invocation with an explicit CLI flag", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-project-flag-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-project-flag-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+
+    writeJson(join(home, ".pi", "agent", "mcp.json"), {
+      settings: { projectConfigDiscovery: "off" },
+      mcpServers: { globalOnly: { command: "global" } },
+    });
+    writeJson(join(project, ".mcp.json"), {
+      mcpServers: { project: { command: "project" } },
+    });
+
+    const { getMcpDiscoverySummary, loadMcpConfig } = await import("../config.ts");
+    const options = { projectConfigDiscovery: "on" as const };
+    expect(loadMcpConfig(undefined, project, options).mcpServers).toEqual({
+      globalOnly: { command: "global" },
+      project: { command: "project" },
+    });
+    expect(loadMcpConfig(undefined, project, options).settings?.projectConfigDiscovery).toBe("on");
+    expect(getMcpDiscoverySummary(undefined, project, options).projectConfigDiscovery).toBe("on");
+    expect(getMcpDiscoverySummary(undefined, project, options).sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "shared-project", active: true, serverCount: 1 }),
+    ]));
+  });
+
+  it("rejects project override writes while project discovery is off unless explicitly enabled", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-project-write-policy-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-project-write-policy-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+
+    writeJson(join(home, ".pi", "agent", "mcp.json"), {
+      settings: { projectConfigDiscovery: "off" },
+      mcpServers: { demo: { command: "demo" } },
+    });
+
+    const { writeProjectServerDisabledOverride } = await import("../config.ts");
+    expect(() => writeProjectServerDisabledOverride(undefined, project, "demo", true)).toThrow(
+      "Cannot write a project MCP override while project MCP discovery is off",
+    );
+    expect(() => writeProjectServerDisabledOverride(
+      undefined,
+      project,
+      "demo",
+      true,
+      { projectConfigDiscovery: "on" },
+    )).not.toThrow();
   });
 
   it("replaces transport-specific fields when an override switches to or from a socket", async () => {
@@ -1384,6 +1546,23 @@ describe("config discovery", () => {
     });
   });
 
+  it("targets user-global config for RepoPrompt setup when project discovery is off", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-repoprompt-policy-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-repoprompt-policy-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+
+    writeJson(join(home, ".pi", "agent", "mcp.json"), {
+      settings: { projectConfigDiscovery: "off" },
+      mcpServers: {},
+    });
+    writeJson(join(project, "package.json"), { name: "fixture" });
+    writeJson(join(home, "RepoPrompt", "repoprompt_cli"), "binary");
+
+    const { getGenericGlobalConfigPath, getMcpDiscoverySummary } = await import("../config.ts");
+    expect(getMcpDiscoverySummary().repoPrompt.targetPath).toBe(getGenericGlobalConfigPath());
+  });
+
   it("writes imported/global changes to Pi config and project changes to the project file", async () => {
     const home = mkdtempSync(join(tmpdir(), "pi-mcp-write-home-"));
     const project = mkdtempSync(join(tmpdir(), "pi-mcp-write-project-"));
@@ -1492,6 +1671,56 @@ describe("config discovery", () => {
     const starterPath = writeStarterProjectConfig();
     const starter = JSON.parse(readFileSync(starterPath, "utf-8"));
     expect(starter.mcpServers).toEqual({});
+  });
+
+  it("ignores repository-scoped host configs when project discovery is off", async () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-mcp-project-host-policy-home-"));
+    const project = mkdtempSync(join(tmpdir(), "pi-mcp-project-host-policy-project-"));
+    process.env.HOME = home;
+    process.chdir(project);
+
+    writeJson(join(home, ".pi", "agent", "mcp.json"), {
+      imports: ["opencode", "vscode"],
+      settings: { projectConfigDiscovery: "off", hostConfigDiscovery: "on" },
+      mcpServers: {},
+    });
+    writeJson(join(home, ".config", "opencode", "opencode.json"), {
+      mcp: { globalHost: { type: "local", command: ["global-host"] } },
+    });
+    writeJson(join(project, "opencode.json"), {
+      mcp: { projectHost: { type: "local", command: ["project-host"] } },
+    });
+    writeJson(join(project, ".vscode", "mcp.json"), {
+      mcpServers: { editorHost: { command: "editor-host" } },
+    });
+
+    const { findAvailableImportConfigs, getMcpDiscoverySummary, getServerProvenance, loadMcpConfig } = await import("../config.ts");
+    expect(loadMcpConfig().mcpServers).toEqual({
+      globalHost: { command: "global-host", args: [] },
+    });
+    expect(findAvailableImportConfigs()).toEqual([
+      { kind: "opencode", path: join(home, ".config", "opencode", "opencode.json") },
+    ]);
+    expect(getMcpDiscoverySummary().imports).toEqual([
+      expect.objectContaining({ kind: "opencode", path: join(home, ".config", "opencode", "opencode.json") }),
+    ]);
+    expect(getMcpDiscoverySummary().hostConfigs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: "opencode",
+        path: join(project, "opencode.json"),
+        active: false,
+        serverCount: 0,
+      }),
+      expect.objectContaining({
+        kind: "vscode",
+        path: join(project, ".vscode", "mcp.json"),
+        active: false,
+        serverCount: 0,
+      }),
+    ]));
+    expect(getServerProvenance().has("globalHost")).toBe(true);
+    expect(getServerProvenance().has("projectHost")).toBe(false);
+    expect(getServerProvenance().has("editorHost")).toBe(false);
   });
 
   it("imports OpenCode servers from the global V1 config", async () => {

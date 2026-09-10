@@ -272,7 +272,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
     this.flowState = initialState
     this.redirectUrlSnapshot = config.grantType === "client_credentials"
       ? undefined
-      : config.redirectUri ?? `http://localhost:${getOAuthCallbackPort()}${getOAuthCallbackPath()}`
+      : config.redirectUri ?? `http://127.0.0.1:${getOAuthCallbackPort()}${getOAuthCallbackPath()}`
   }
 
   private get usesClientCredentials(): boolean {
