@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added `MCP_UI_VIEWER=silent` to return MCP tool results without starting MCP App UI/proxy servers or emitting UI notifications.
 - Added user-owned `settings.projectConfigDiscovery` policy. Set it to `"off"` in global MCP config to ignore repository MCP sources, with `--mcp-project-config` as an explicit one-run opt-in.
 
 ### Fixed

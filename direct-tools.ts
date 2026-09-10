@@ -562,7 +562,7 @@ export function createDirectToolExecutor(
 
       const content = resolveMcpResultContent(result as Record<string, unknown>, state.owner?.signal);
       const outputContent = content.length > 0 ? content : [{ type: "text" as const, text: "(empty result)" }];
-      if (hasUi) {
+      if (uiSession) {
         const uiSummary = summarizeUiSessionResult(uiSession);
         const guarded = await guardMcpOutput(outputContent, {
           ...outputGuardOptions,

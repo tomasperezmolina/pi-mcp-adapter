@@ -1411,8 +1411,8 @@ export async function executeCall(
       },
     );
 
-    if (toolMeta.uiResourceUri) {
-      uiSession?.sendToolResult(result as unknown as import("@modelcontextprotocol/client").CallToolResult);
+    if (uiSession) {
+      uiSession.sendToolResult(result as unknown as import("@modelcontextprotocol/client").CallToolResult);
 
       if (result.isError) {
         const mcpContent = (result.content ?? []) as McpContent[];
