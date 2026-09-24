@@ -243,7 +243,7 @@ describe("proxy auto auth", () => {
     const statuses: string[] = [];
     const state = {
       config: {
-        settings: { autoAuth: true, toolPrefix: "mcp", showStatusIcon: false },
+        settings: { autoAuth: true, manualOAuthCallbackFallback: false, toolPrefix: "mcp", showStatusIcon: false },
         mcpServers: {
           demo: { url: "https://api.example.com/mcp", auth: "oauth" },
         },
@@ -263,8 +263,13 @@ describe("proxy auto auth", () => {
       "demo",
       "https://api.example.com/mcp",
       state.config.mcpServers.demo,
-      { runtime: state.oauthRuntime },
+      expect.objectContaining({
+        runtime: state.oauthRuntime,
+        onAuthorizationUrl: expect.any(Function),
+      }),
     );
+    expect(mocks.authenticate.mock.calls[0][3].onAuthorizationInput).toBeUndefined();
+    expect(statuses).toContain("MCP: authenticating demo...");
     expect(manager.close).toHaveBeenCalledWith("demo");
     expect(manager.connect).toHaveBeenCalledTimes(2);
     expect(state.toolMetadata.get("demo")?.[0]).toMatchObject({
@@ -437,7 +442,11 @@ describe("proxy auto auth", () => {
       "demo",
       "https://api.example.com/mcp",
       state.config.mcpServers.demo,
-      { signal: controller.signal },
+      expect.objectContaining({
+        signal: controller.signal,
+        onAuthorizationUrl: expect.any(Function),
+        onAuthorizationInput: expect.any(Function),
+      }),
     );
     expect(manager.connect).toHaveBeenCalledTimes(1);
     expect(manager.getRequestOptions).toHaveBeenCalledWith("demo", controller.signal);
@@ -477,7 +486,11 @@ describe("proxy auto auth", () => {
       "demo",
       "https://api.example.com/mcp",
       state.config.mcpServers.demo,
-      { signal: controller.signal },
+      expect.objectContaining({
+        signal: controller.signal,
+        onAuthorizationUrl: expect.any(Function),
+        onAuthorizationInput: expect.any(Function),
+      }),
     );
   });
 

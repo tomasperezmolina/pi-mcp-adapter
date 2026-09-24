@@ -10,6 +10,8 @@ import { computeServerHash, type MetadataCache } from "../metadata-cache.ts";
 import { McpServerManager } from "../server-manager.ts";
 import { UiResourceHandler } from "../ui-resource-handler.ts";
 
+const PROJECT_CONFIGS_ON = { projectConfigDiscovery: "on" } as const;
+
 const cache: MetadataCache = {
   version: 1,
   servers: {
@@ -134,12 +136,12 @@ describe("disabled MCP servers", () => {
       onlyFlag: { disabled: true },
     }}));
 
-    expect(writeProjectServerDisabledOverride(undefined, cwd, "disabled", true)).toMatchObject({ changed: true, path: filePath });
+    expect(writeProjectServerDisabledOverride(undefined, cwd, "disabled", true, PROJECT_CONFIGS_ON)).toMatchObject({ changed: true, path: filePath });
     const disabledRaw = JSON.parse(readFileSync(filePath, "utf8"));
     expect(disabledRaw.unrelated).toEqual({ keep: true });
     expect(disabledRaw.mcpServers.disabled).toEqual({ disabled: true, directTools: true });
 
-    expect(writeProjectServerDisabledOverride(undefined, cwd, "onlyFlag", false)).toMatchObject({ changed: true });
+    expect(writeProjectServerDisabledOverride(undefined, cwd, "onlyFlag", false, PROJECT_CONFIGS_ON)).toMatchObject({ changed: true });
     const enabledRaw = JSON.parse(readFileSync(filePath, "utf8"));
     expect(enabledRaw.mcpServers.onlyFlag).toBeUndefined();
     expect(enabledRaw.mcpServers.disabled.directTools).toBe(true);
@@ -150,9 +152,9 @@ describe("disabled MCP servers", () => {
     const overridePath = join(cwd, "factory.json");
     writeFileSync(overridePath, JSON.stringify({ mcpServers: { lower: { command: "node", disabled: true } } }));
 
-    expect(writeProjectServerDisabledOverride(overridePath, cwd, "lower", false)).toMatchObject({ changed: true });
+    expect(writeProjectServerDisabledOverride(overridePath, cwd, "lower", false, PROJECT_CONFIGS_ON)).toMatchObject({ changed: true });
     expect(JSON.parse(readFileSync(join(cwd, ".pi", "mcp.json"), "utf8")).mcpServers.lower).toEqual({ disabled: false });
-    expect(loadMcpConfig(overridePath, cwd).mcpServers.lower.disabled).toBe(false);
+    expect(loadMcpConfig(overridePath, cwd, PROJECT_CONFIGS_ON).mcpServers.lower.disabled).toBe(false);
   });
 
   it("enables a server disabled by an import declared in the project override", () => {
@@ -167,9 +169,9 @@ describe("disabled MCP servers", () => {
       mcpServers: { imported: { disabled: true } },
     }));
 
-    expect(writeProjectServerDisabledOverride(undefined, cwd, "imported", false)).toMatchObject({ changed: true });
+    expect(writeProjectServerDisabledOverride(undefined, cwd, "imported", false, PROJECT_CONFIGS_ON)).toMatchObject({ changed: true });
     expect(JSON.parse(readFileSync(join(cwd, ".pi", "mcp.json"), "utf8")).mcpServers.imported).toEqual({ disabled: false });
-    expect(loadMcpConfig(undefined, cwd).mcpServers.imported).toMatchObject({ command: "node", disabled: false });
+    expect(loadMcpConfig(undefined, cwd, PROJECT_CONFIGS_ON).mcpServers.imported).toMatchObject({ command: "node", disabled: false });
   });
 
   it("preserves the supported raw server-map key while updating an override", () => {
@@ -178,11 +180,11 @@ describe("disabled MCP servers", () => {
     mkdirSync(join(cwd, ".pi"));
     writeFileSync(filePath, JSON.stringify({ "mcp-servers": { alias: { command: "node", args: ["server"] } } }));
 
-    expect(writeProjectServerDisabledOverride(undefined, cwd, "alias", true)).toMatchObject({ changed: true });
+    expect(writeProjectServerDisabledOverride(undefined, cwd, "alias", true, PROJECT_CONFIGS_ON)).toMatchObject({ changed: true });
     const raw = JSON.parse(readFileSync(filePath, "utf8"));
     expect(raw.mcpServers).toBeUndefined();
     expect(raw["mcp-servers"].alias).toEqual({ command: "node", args: ["server"], disabled: true });
-    expect(loadMcpConfig(undefined, cwd).mcpServers.alias).toMatchObject({ command: "node", args: ["server"], disabled: true });
+    expect(loadMcpConfig(undefined, cwd, PROJECT_CONFIGS_ON).mcpServers.alias).toMatchObject({ command: "node", args: ["server"], disabled: true });
   });
 
   it("preserves malformed project overrides instead of replacing them", () => {
@@ -191,7 +193,7 @@ describe("disabled MCP servers", () => {
     mkdirSync(join(cwd, ".pi"));
     writeFileSync(filePath, "{ malformed");
 
-    expect(() => writeProjectServerDisabledOverride(undefined, cwd, "server", true)).toThrow("Failed to read project MCP override");
+    expect(() => writeProjectServerDisabledOverride(undefined, cwd, "server", true, PROJECT_CONFIGS_ON)).toThrow("Failed to read project MCP override");
     expect(readFileSync(filePath, "utf8")).toBe("{ malformed");
   });
 

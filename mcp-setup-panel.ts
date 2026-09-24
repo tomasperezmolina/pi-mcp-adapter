@@ -242,6 +242,12 @@ class McpSetupPanelView implements Component {
   }
 
   private secondarySummaryLine(state: McpSetupPanelViewState): string {
+    const inactiveProjectSources = state.discovery.sources.filter(
+      (source) => source.scope === "project" && source.exists && !source.active,
+    ).length;
+    const projectNote = inactiveProjectSources > 0
+      ? `Project MCP discovery is off; ${inactiveProjectSources} detected project source${inactiveProjectSources === 1 ? " is" : "s are"} inactive. `
+      : "";
     const hostNote = state.discovery.hostConfigs.length > 0
       ? ` Host discovery is ${state.discovery.hostConfigDiscovery}; ${state.discovery.hostConfigs.length} host source${state.discovery.hostConfigs.length === 1 ? "" : "s"} detected.`
       : "";
@@ -249,12 +255,12 @@ class McpSetupPanelView implements Component {
       ? ` ${state.discovery.conflicts.length} same-name conflict${state.discovery.conflicts.length === 1 ? "" : "s"} reported.`
       : "";
     if (!state.discovery.hasAnyConfig) {
-      return `Add shared servers to .mcp.json for this project/team or ~/.config/mcp/mcp.json for all projects. Adopt host imports or quick-add RepoPrompt from this screen.${hostNote}${conflictNote}`;
+      return `${projectNote}Add shared servers to .mcp.json for this project/team or ~/.config/mcp/mcp.json for all projects. Adopt host imports or quick-add RepoPrompt from this screen.${hostNote}${conflictNote}`;
     }
     if (state.discovery.totalServerCount === 0 && state.discovery.imports.length > 0) {
-      return `Detected ${state.discovery.imports.length} compatibility import source${state.discovery.imports.length === 1 ? "" : "s"}. Adopt them into Pi or inspect the underlying files.${hostNote}${conflictNote}`;
+      return `${projectNote}Detected ${state.discovery.imports.length} compatibility import source${state.discovery.imports.length === 1 ? "" : "s"}. Adopt them into Pi or inspect the underlying files.${hostNote}${conflictNote}`;
     }
-    return `Use .mcp.json for project/team servers or ~/.config/mcp/mcp.json for all projects. Pi-owned files are for compatibility imports and adapter-specific overrides, not another normal setup path.${hostNote}${conflictNote}`;
+    return `${projectNote}Use .mcp.json for project/team servers or ~/.config/mcp/mcp.json for all projects. Pi-owned files are for compatibility imports and adapter-specific overrides, not another normal setup path.${hostNote}${conflictNote}`;
   }
 
   private visibleActionRange(total: number, cursor: number): { start: number; end: number } {
@@ -444,6 +450,7 @@ export class McpSetupPanel {
     this.keys = createPanelKeys(options.keybindings);
     this.view = new McpSetupPanelView(() => this.getViewState(), callbacks, createMcpPanelTheme(options.theme));
     this.screen = options.mode;
+    if (discovery.projectConfigDiscovery === "off") this.sharedConfigTarget = "global";
     for (const entry of discovery.imports) {
       this.selectedImports.add(entry.kind);
     }

@@ -129,7 +129,12 @@ test("token CLI avoids package-local TypeScript imports under node_modules", asy
       ].join("\n")
     ], {
       cwd: fixtureRoot,
-      env: { ...process.env, PI_MCP_ADAPTER_TEST_AUTH_STORE: "memory" },
+      env: {
+        ...process.env,
+        HOME: fixtureRoot,
+        USERPROFILE: fixtureRoot,
+        PI_MCP_ADAPTER_TEST_AUTH_STORE: "memory"
+      },
       encoding: "utf8"
     });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);

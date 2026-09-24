@@ -123,7 +123,7 @@ Run the `/mcp-auth` command with the server name:
 /mcp-auth my-oauth-server
 ```
 
-Manual `/mcp-auth` is the default flow. If you set `settings.autoAuth: true`, proxy/direct tool execution will trigger OAuth automatically when a server returns `needs-auth`, then retry the original operation once.
+Manual `/mcp-auth` is the default flow. If you set `settings.autoAuth: true`, proxy/direct tool execution and interactive `auth-start` actions use this same complete browser flow; tool execution retries the original operation once. Set `settings.manualOAuthCallbackFallback: false` when localhost callback ports are forwarded reliably so every interactive entry point waits for automatic callback delivery and never requests a pasted callback URL.
 
 This will:
 1. Start the callback server lazily on an OS-assigned local port, on an OS-assigned host-specific `{port}` callback, or on the exact `oauth.redirectUri` port for fixed callbacks
@@ -220,7 +220,7 @@ The adapter does not provide a default URL or host the public document: operator
 2. Registers a new client with:
    - `client_name`: configured `oauth.clientName` or "Pi Coding Agent"
    - `client_uri`: configured `oauth.clientUri` or the adapter repository URL
-   - `redirect_uris`: `["http://localhost:<active-callback-port>/callback"]`, or the configured `oauth.redirectUri`
+   - `redirect_uris`: `["http://127.0.0.1:<active-callback-port>/callback"]`, or the configured `oauth.redirectUri`
    - `grant_types`: `["authorization_code", "refresh_token"]`
 3. Stores the registered client credentials and the redirect URIs returned by the authorization server
 
@@ -251,7 +251,7 @@ For Windows OpenSSH/headless use, `settings.oauthCredentialStore: "encrypted-fil
 
 Encrypted-file writes use private directory/file modes where supported and same-directory atomic replacement. POSIX modes are checked on reads, but they do not establish a Windows ACL; encryption with the external key is the confidentiality boundary. This backend never falls back to the OS store, reads `oauthDir` / `MCP_OAUTH_DIR`, or imports legacy plaintext. Reauthenticate after opting in. Key loss or rotation makes existing envelopes unreadable; remove them and reauthenticate with the new key.
 
-On Linux, if credential access fails because Pi inherited a revoked session keyring, the adapter makes one best-effort retry through `keyctl session - node <packaged helper>`. This lets explicit re-authentication write fresh credentials from a new session keyring without restarting a long-lived tmux or server process. The recovery path requires `keyctl` and `node` on `PATH`; missing, locked, or otherwise unavailable credential stores still fail closed.
+On Linux, if credential access fails because Pi inherited a revoked session keyring, the adapter makes one best-effort retry through `keyctl session pi-mcp-adapter.oauth node <packaged helper>`. Recovery batches all chunks for each credential-store step into one helper invocation and reclaims old chunks before allocating a replacement, avoiding anonymous-session and per-user key-quota exhaustion. This lets explicit re-authentication write fresh credentials without restarting a long-lived tmux or server process. The recovery path requires `keyctl` and `node` on `PATH`; missing, locked, or otherwise unavailable credential stores still fail closed.
 
 Complete credential entries are held in memory for the lifetime of the Pi process on every supported credential-store platform. The MCP SDK reads the access token before every outbound request, so caching avoids a credential-store lookup on each tool call; on Linux this specifically avoids overloading the Secret Service daemon. The cache is filled on the first read for a server and covers both present and absent entries. Authenticating, refreshing, and logging out all update it immediately, so credential changes made through Pi take effect at once. Status-panel inspection deliberately bypasses it and still reads the store directly.
 
@@ -320,13 +320,13 @@ Some servers require pre-registered clients. Obtain a client ID from your OAuth 
 
 ### Callback server already in use
 
-Dynamic fallback browser OAuth uses a lazy OS-assigned port on the default loopback host (`localhost`), so the configured default port being busy should not block fallback registration.
+Dynamic fallback browser OAuth uses a lazy OS-assigned port on deterministic IPv4 loopback (`127.0.0.1`), so the configured default port being busy should not block fallback registration.
 
 For pre-registered OAuth clients (`oauth.clientId`), the callback redirect URI must match the provider registration policy. Set `oauth.redirectUri` to the full fixed callback, such as Slack MCP's Claude-compatible `http://localhost:3118/callback`, use a loopback `{port}` URI when the provider explicitly permits dynamic RFC 8252 ports, or free/set `MCP_OAUTH_CALLBACK_PORT` when you rely on the default `/callback` path without an explicit redirect URI.
 
 ### Browser doesn't open
 
-If the browser fails to open (e.g., in SSH sessions), the authorization URL will be displayed. Copy it manually to your browser.
+Interactive authentication—including `autoAuth` from proxy and direct tools—opens the authorization URL through Pi and waits non-modally for the localhost callback. With the default `manualOAuthCallbackFallback: true`, browser launch failure offers manual callback input immediately and a successful launch offers it after 10 seconds without a callback. With `manualOAuthCallbackFallback: false`, Pi never opens pasted callback input and waits only for the forwarded localhost callback, bounded by the five-minute callback timeout. Non-UI `auth-start`/`auth-complete` retain the explicit two-phase URL handoff.
 
 ## Architecture
 

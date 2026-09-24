@@ -57,7 +57,7 @@ export interface McpOAuthRuntime {
 }
 
 export interface AuthenticateOptions {
-  onAuthorizationUrl?: (authorizationUrl: string) => void | Promise<void>
+  onAuthorizationUrl?: (authorizationUrl: string) => boolean | void | Promise<boolean | void>
   openAuthorizationUrl?: (authorizationUrl: string) => void | Promise<void>
   onAuthorizationInput?: (
     authorizationUrl: string,
@@ -99,7 +99,13 @@ type PendingAuth = {
   authority: OAuthAuthority
 }
 
-type PendingAuthentication = { promise: Promise<AuthStatus>; authority: OAuthAuthority }
+type PendingAuthentication = {
+  promise: Promise<AuthStatus>
+  controller: AbortController
+  waiters: number
+  settled: boolean
+  authority: OAuthAuthority
+}
 
 type RuntimeState = {
   controller: AbortController
@@ -992,21 +998,33 @@ export async function authenticate(
   const runtime = getRuntime(options)
   const runtimeState = getRuntimeState(runtime)
   const authStorageOptions = options.authStorageOptions ?? {}
-  const signal = combineAbortSignals(runtime.signal, options.signal)
-  throwIfAborted(signal)
+  const callerSignal = combineAbortSignals(runtime.signal, options.signal)
+  throwIfAborted(callerSignal)
   const authKey = JSON.stringify([serverName, serverUrl, ...getAuthStorageIdentity(authStorageOptions)])
   const inFlight = runtimeState.pendingAuthentications.get(authKey)
   if (inFlight) {
     try {
       inFlight.authority()
-      return inFlight.promise
     } catch {
       if (runtimeState.pendingAuthentications.get(authKey) === inFlight) {
         runtimeState.pendingAuthentications.delete(authKey)
       }
     }
+    if (runtimeState.pendingAuthentications.get(authKey) === inFlight) {
+      inFlight.waiters++
+      try {
+        const result = await abortable(inFlight.promise, callerSignal)
+        authority()
+        return result
+      } finally {
+        inFlight.waiters--
+        if (inFlight.waiters === 0 && !inFlight.settled) inFlight.controller.abort()
+      }
+    }
   }
 
+  const sharedController = new AbortController()
+  const signal = combineAbortSignals(runtime.signal, sharedController.signal)
   const operation = (async (): Promise<AuthStatus> => {
     const { authorizationUrl } = await startAuth(serverName, serverUrl, definition, {
       ...options,
@@ -1049,20 +1067,23 @@ export async function authenticate(
 
       // Open browser. Always surface the URL first so remote/headless users can copy it
       // even when the OS browser handoff is unavailable or invisible.
+      let authorizationUrlHandled = false
       if (options.onAuthorizationUrl) {
-        await abortable(Promise.resolve(options.onAuthorizationUrl(authorizationUrl)), signal)
+        authorizationUrlHandled = await abortable(Promise.resolve(options.onAuthorizationUrl(authorizationUrl)), signal) === true
       } else {
         console.log(`MCP Auth: Open this URL to authenticate ${serverName}:\n${authorizationUrl}`)
       }
-      try {
-        await abortable(Promise.resolve(
-          options.openAuthorizationUrl
-            ? options.openAuthorizationUrl(authorizationUrl)
-            : open(authorizationUrl),
-        ), signal)
-      } catch (error) {
-        if (isAbortError(error, signal)) throw error
-        console.warn(`MCP Auth: Failed to open browser for ${serverName}; waiting for manual callback`, { error })
+      if (!authorizationUrlHandled) {
+        try {
+          await abortable(Promise.resolve(
+            options.openAuthorizationUrl
+              ? options.openAuthorizationUrl(authorizationUrl)
+              : open(authorizationUrl),
+          ), signal)
+        } catch (error) {
+          if (isAbortError(error, signal)) throw error
+          console.warn(`MCP Auth: Failed to open browser for ${serverName}; waiting for manual callback`, { error })
+        }
       }
 
       const authorizationResponse = await waitForAuthorizationResponse(
@@ -1096,17 +1117,28 @@ export async function authenticate(
     }
   })()
 
-  const pendingAuthentication = { promise: operation, authority }
-  runtimeState.pendingAuthentications.set(authKey, pendingAuthentication)
+  const pending: PendingAuthentication = {
+    promise: operation,
+    controller: sharedController,
+    waiters: 1,
+    settled: false,
+    authority,
+  }
+  runtimeState.pendingAuthentications.set(authKey, pending)
+  void operation.finally(() => {
+    pending.settled = true
+    if (runtimeState.pendingAuthentications.get(authKey) === pending) {
+      runtimeState.pendingAuthentications.delete(authKey)
+    }
+  }).catch(() => {})
 
   try {
-    const result = await operation
+    const result = await abortable(operation, callerSignal)
     authority()
     return result
   } finally {
-    if (runtimeState.pendingAuthentications.get(authKey) === pendingAuthentication) {
-      runtimeState.pendingAuthentications.delete(authKey)
-    }
+    pending.waiters--
+    if (pending.waiters === 0 && !pending.settled) pending.controller.abort()
   }
 }
 

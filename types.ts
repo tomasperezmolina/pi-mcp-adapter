@@ -555,6 +555,7 @@ function encodeServerNamespace(name: string): string {
   }).join("");
 }
 export type HostConfigDiscovery = "off" | "prompt" | "on";
+export type ProjectConfigDiscovery = "off" | "on";
 export type McpFooterStatus = "full" | "compact" | "off";
 
 export interface McpTraceSettings {
@@ -599,6 +600,8 @@ export interface McpSettings {
   notifyOnStartupConnect?: boolean;
   /** Discover detected host-specific MCP configs only when explicitly enabled. */
   hostConfigDiscovery?: HostConfigDiscovery;
+  /** Load MCP configuration from the active project. Defaults to on for compatibility. */
+  projectConfigDiscovery?: ProjectConfigDiscovery;
   /** Trusted HOME-contained roots from which to discover ancestor project configs. */
   ancestorConfigRoots?: string[];
   /** Agent Plugin package directories to load MCP servers from. */
@@ -656,7 +659,10 @@ export interface McpSettings {
    * and explicit reconnects won't rebuild the system prompt, preserving the
    * prompt-cache prefix. Proxy/search/cache metadata still refreshes. Default: false. */
   freezeDirectTools?: boolean;
+  /** Automatically run OAuth from connect and tool calls instead of returning auth-start guidance. */
   autoAuth?: boolean;
+  /** Offer pasted callback input if automatic localhost OAuth completion is unavailable. Defaults to true. */
+  manualOAuthCallbackFallback?: boolean;
   sampling?: boolean;
   samplingAutoApprove?: boolean;
   elicitation?: boolean;

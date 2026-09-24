@@ -425,13 +425,16 @@ describe("Claude plugin bundles", () => {
     expect(warning).toHaveBeenCalledWith(expect.stringContaining("outside its skills directory"));
   });
 
-  it("preserves existing config behavior when claudePlugins is absent", async () => {
+  it("loads native servers when claudePlugins is absent", async () => {
     const { project } = setup();
     writeJson(join(project, ".mcp.json"), { mcpServers: { native: { command: "native" } } });
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const { loadMcpConfig } = await import("../config.ts");
-    expect(loadMcpConfig()).toEqual({ mcpServers: { native: { command: "native" } } });
+    expect(loadMcpConfig()).toEqual({
+      mcpServers: { native: { command: "native" } },
+      settings: { projectConfigDiscovery: "on" },
+    });
     expect(warning).not.toHaveBeenCalled();
   });
 });

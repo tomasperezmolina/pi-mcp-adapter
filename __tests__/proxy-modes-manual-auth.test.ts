@@ -183,6 +183,59 @@ describe("manual OAuth proxy actions", () => {
     expect(result.content[0].text).not.toContain("redirected localhost URL");
   });
 
+  it("uses the unified interactive flow for auth-start when auto-auth is enabled", async () => {
+    mocks.authenticate.mockResolvedValueOnce("authenticated");
+    const { executeAuthStart } = await import("../proxy-modes.ts");
+    const state = createState({
+      config: {
+        settings: { autoAuth: true, manualOAuthCallbackFallback: false },
+        mcpServers: { demo: { url: "https://api.example.com/mcp", auth: "oauth" } },
+      },
+      ui: { notify: vi.fn(), setStatus: vi.fn(), confirm: vi.fn(), input: vi.fn() },
+      openBrowser: vi.fn(),
+      copyText: vi.fn(),
+      authStorageOptions: {},
+    });
+
+    const result = await executeAuthStart(state, "demo");
+
+    expect(mocks.startAuth).not.toHaveBeenCalled();
+    expect(mocks.authenticate).toHaveBeenCalledWith(
+      "demo",
+      "https://api.example.com/mcp",
+      state.config.mcpServers.demo,
+      expect.objectContaining({
+        authStorageOptions: state.authStorageOptions,
+        onAuthorizationUrl: expect.any(Function),
+        runtime: state.oauthRuntime,
+      }),
+    );
+    expect(mocks.authenticate.mock.calls[0][3].onAuthorizationInput).toBeUndefined();
+    expect(state.manager.close).toHaveBeenCalledWith("demo");
+    expect(result.content[0].text).toContain("OAuth authentication successful");
+    expect(result.details).toMatchObject({ mode: "auth-start", server: "demo", authenticated: true });
+  });
+
+  it("propagates cancellation from unified interactive auth-start", async () => {
+    const controller = new AbortController();
+    mocks.authenticate.mockImplementationOnce(async () => {
+      controller.abort();
+      throw controller.signal.reason;
+    });
+    const { executeAuthStart } = await import("../proxy-modes.ts");
+    const state = createState({
+      config: {
+        settings: { autoAuth: true },
+        mcpServers: { demo: { url: "https://api.example.com/mcp", auth: "oauth" } },
+      },
+      ui: { notify: vi.fn(), setStatus: vi.fn(), confirm: vi.fn(), input: vi.fn() },
+      openBrowser: vi.fn(),
+      copyText: vi.fn(),
+    });
+
+    await expect(executeAuthStart(state, "demo", controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("rejects auth-start for non-OAuth servers", async () => {
     const { executeAuthStart } = await import("../proxy-modes.ts");
 
@@ -191,6 +244,19 @@ describe("manual OAuth proxy actions", () => {
     expect(mocks.startAuth).not.toHaveBeenCalled();
     expect(result.content[0].text).toContain("not configured for OAuth");
     expect(result.details).toMatchObject({ error: "oauth_not_supported" });
+  });
+
+  it("propagates cancellation from auth-complete", async () => {
+    const controller = new AbortController();
+    mocks.completeAuthFromInput.mockImplementationOnce(async () => {
+      controller.abort();
+      throw controller.signal.reason;
+    });
+    const { executeAuthComplete } = await import("../proxy-modes.ts");
+
+    await expect(
+      executeAuthComplete(createState(), "demo", "http://localhost/callback?code=abc&state=state", controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
   });
 
   it("completes auth from a copied redirect URL and resets connection state", async () => {

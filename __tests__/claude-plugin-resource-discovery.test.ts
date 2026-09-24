@@ -5,8 +5,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createAgentSession, DefaultResourceLoader, initTheme, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 const roots: string[] = [];
+const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 
 afterEach(async () => {
+  if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
@@ -23,7 +26,9 @@ describe("Claude plugin skill resource discovery", () => {
       mkdir(join(plugin, ".claude-plugin"), { recursive: true }),
       mkdir(join(plugin, "skills", "first-skill"), { recursive: true }),
     ]);
+    process.env.PI_CODING_AGENT_DIR = agentDir;
     await Promise.all([
+      writeFile(join(agentDir, "mcp.json"), JSON.stringify({ settings: { projectConfigDiscovery: "on" }, mcpServers: {} })),
       writeFile(join(plugin, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "resource-fixture" })),
       writeFile(join(plugin, "skills", "first-skill", "SKILL.md"), "---\nname: first-skill\ndescription: First fixture skill\n---\n"),
       writeFile(join(cwd, ".mcp.json"), JSON.stringify({

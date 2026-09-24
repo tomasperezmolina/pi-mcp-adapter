@@ -69,6 +69,7 @@ function createEmptyDiscovery(): McpDiscoverySummary {
     totalServerCount: 0,
     hostConfigs: [],
     hostConfigDiscovery: "off",
+    projectConfigDiscovery: "on",
     conflicts: [],
     fingerprint: "test",
     repoPrompt: { configured: false },
@@ -319,6 +320,58 @@ describe("mcp-setup-panel custom keybindings", () => {
     expect(output).toContain("DeepWiki");
     expect(output).toContain("starter write");
     expect(output).toContain("Enter select");
+    panel.dispose();
+  });
+
+  it("does not offer inactive project scaffolding when discovery is off", () => {
+    const discovery = createEmptyDiscovery();
+    discovery.projectConfigDiscovery = "off";
+
+    const panel = createMcpSetupPanel(
+      discovery,
+      createSetupCallbacks(),
+      {
+        mode: "setup",
+        onboardingState: { version: 1, sharedConfigHintShown: false, setupCompleted: false },
+      },
+      { requestRender: () => {} },
+      () => {},
+    );
+
+    const output = stripAnsi(panel.render(100).join("\n"));
+    expect(output).not.toContain("Scaffold project `.mcp.json`");
+    panel.dispose();
+  });
+
+  it("reports detected project MCP files as inactive when discovery is off", () => {
+    const discovery = createEmptyDiscovery();
+    discovery.hasAnyConfig = true;
+    discovery.hasAnyDetectedPaths = true;
+    discovery.projectConfigDiscovery = "off";
+    discovery.sources = [{
+      id: "shared-project",
+      label: "project standard MCP",
+      path: "/workspace/.mcp.json",
+      exists: true,
+      scope: "project",
+      kind: "shared",
+      active: false,
+      serverCount: 0,
+    }];
+
+    const panel = createMcpSetupPanel(
+      discovery,
+      createSetupCallbacks(),
+      {
+        mode: "setup",
+        onboardingState: { version: 1, sharedConfigHintShown: false, setupCompleted: false },
+      },
+      { requestRender: () => {} },
+      () => {},
+    );
+
+    const output = stripAnsi(panel.render(100).join("\n"));
+    expect(output).toContain("Project MCP discovery is off; 1 detected project source is inactive.");
     panel.dispose();
   });
 

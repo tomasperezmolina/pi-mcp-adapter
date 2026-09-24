@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFile } from "node:child_process";
 import { ConsentManager } from "../consent-manager.ts";
 import { createDirectToolExecutor } from "../direct-tools.ts";
@@ -70,6 +70,12 @@ function makeState() {
 
   return { state, callTool };
 }
+
+beforeEach(() => {
+  delete process.env.MCP_UI_VIEWER;
+  delete process.env.SSH_CONNECTION;
+  delete process.env.SSH_TTY;
+});
 
 afterEach(() => {
   delete process.env.MCP_UI_VIEWER;
@@ -156,6 +162,59 @@ describe("MCP UI context submissions", () => {
     );
 
     runtime.close("test-cleanup");
+  });
+});
+
+describe("MCP_UI_VIEWER=silent", () => {
+  it("skips the UI session without opening a viewer or notifying the user", async () => {
+    process.env.MCP_UI_VIEWER = "silent";
+    const { state } = makeState();
+
+    const runtime = await maybeStartUiSession(state, {
+      serverName: "demo",
+      toolName: "app",
+      toolArgs: {},
+      uiResourceUri: "ui://app",
+    });
+
+    expect(runtime).toBeNull();
+    expect(state.uiResourceHandler.readUiResource).not.toHaveBeenCalled();
+    expect(state.uiServer).toBeNull();
+    expect(state.openBrowser).not.toHaveBeenCalled();
+    expect(state.ui.notify).not.toHaveBeenCalled();
+  });
+
+  it("returns proxy tool output without UI details", async () => {
+    process.env.MCP_UI_VIEWER = "silent";
+    const { state } = makeState();
+
+    const result = await executeCall(state, "demo_app", {}, "demo");
+
+    expect(textOf(result)).toContain("tool output");
+    expect(textOf(result)).not.toContain("MCP UI");
+    expect(result.details).not.toHaveProperty("uiOpen");
+    expect(result.details).not.toHaveProperty("uiUrl");
+    expect(state.uiResourceHandler.readUiResource).not.toHaveBeenCalled();
+    expect(state.ui.notify).not.toHaveBeenCalled();
+  });
+
+  it("returns direct tool output without UI details", async () => {
+    process.env.MCP_UI_VIEWER = "silent";
+    const { state } = makeState();
+    const execute = createDirectToolExecutor(
+      () => state,
+      () => null,
+      { serverName: "demo", originalName: "app", prefixedName: "demo_app", description: "App", uiResourceUri: "ui://app" },
+    );
+
+    const result = await execute("call-1", {}, undefined as any, () => {}, undefined as any);
+
+    expect(textOf(result)).toContain("tool output");
+    expect(textOf(result)).not.toContain("MCP UI");
+    expect(result.details).not.toHaveProperty("uiOpen");
+    expect(result.details).not.toHaveProperty("uiUrl");
+    expect(state.uiResourceHandler.readUiResource).not.toHaveBeenCalled();
+    expect(state.ui.notify).not.toHaveBeenCalled();
   });
 });
 

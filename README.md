@@ -430,13 +430,13 @@ Public servers are ready immediately. For OAuth servers, the same action opens t
 
 ### Remote/headless OAuth
 
-If Pi is running on a remote server, `/mcp-auth <server>` shows a clickable authorization URL first. Open it in your local browser and approve access, then select **Yes** in Pi to open the callback input. The browser may fail to load the localhost callback page because localhost refers to your workstation; copy the full URL from its address bar and paste it into Pi. The authorization screen closes automatically instead when the browser can reach Pi's callback directly.
+In an interactive local session, `/mcp-auth <server>` opens the authorization URL through Pi and waits for the localhost callback without covering the terminal with an input screen. With the default `manualOAuthCallbackFallback: true`, Pi offers pasted callback input immediately if browser launch fails or after 10 seconds without a callback. Set it to `false` when localhost ports are forwarded reliably; every interactive entry point then waits only for automatic callback delivery and never requests a copied browser URL.
 
 The same flow is available through the proxy tool for non-interactive clients. By default, persistent OAuth requires an available OS credential store; on headless Linux that usually means an unlocked Secret Service/libsecret keyring. The adapter fails closed instead of falling back to plaintext credentials when the secure store is unavailable.
 
 Windows OpenSSH network logons can return `ERROR_NO_SUCH_LOGON_SESSION` (1312) because Credential Manager is unavailable to that logon. For this case, explicitly set `settings.oauthCredentialStore` to `"encrypted-file"` and inject `PI_MCP_ADAPTER_OAUTH_FILE_KEY` as canonical base64 for 32 random bytes (`node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`). Encrypted entries live under the Pi agent directory's `mcp-oauth-encrypted/`; keep the key separately and reauthenticate after loss or rotation. This backend never falls back to the OS store or imports legacy plaintext; see [OAuth](OAUTH.md#token-storage) for its security model.
 
-On Linux, if credential access fails because Pi inherited a revoked session keyring, the adapter uses a best-effort recovery path through `keyctl session - node <packaged helper>` so explicit re-authentication can write fresh credentials without killing a long-lived tmux server. This path requires `keyctl` and `node` on `PATH`; missing, locked, or otherwise unavailable credential stores still fail closed.
+On Linux, if credential access fails because Pi inherited a revoked session keyring, the adapter uses a best-effort recovery path through `keyctl session pi-mcp-adapter.oauth node <packaged helper>` so explicit re-authentication can write fresh credentials without killing a long-lived tmux server. This path requires `keyctl` and `node` on `PATH`; missing, locked, or otherwise unavailable credential stores still fail closed.
 
 ```js
 mcp({ action: "auth-start", server: "linear-server" })
@@ -482,6 +482,9 @@ When any enabled server uses `eager` or `keep-alive`, initialization also starts
     "notifyOnStartupConnect": true,
     "warnOnLargeDirectTools": true,
     "hostConfigDiscovery": "off",
+    "projectConfigDiscovery": "on",
+    "autoAuth": false,
+    "manualOAuthCallbackFallback": true,
     "approveTools": ["github_delete_*", "notion_update_*"],
     "oauthDir": ".pi/mcp-oauth",
     "trace": {
@@ -847,7 +850,7 @@ MCP servers can ship interactive UIs via the [MCP UI](https://github.com/MCP-UI-
 3. pi-mcp-adapter fetches the UI HTML and opens it in an iframe
 4. The UI can call MCP tools and send messages back to the agent
 
-**Native rendering:** On macOS, if [Glimpse](https://github.com/hazat/glimpse) is installed (`pi install npm:glimpseui`), UIs open in a native WKWebView window instead of a browser tab. Set `MCP_UI_VIEWER=browser` to force the browser, `MCP_UI_VIEWER=glimpse` to require native rendering, or `MCP_UI_VIEWER=none` (also accepts `off` / `disabled`) to suppress the window entirely — the tool still runs and its inline result is returned to the agent, but no browser or native window opens. This is useful for headless setups, CI, or users who want the tool output delivered inline as text only. When suppressed, a one-line info notification shows the UI URL so it can still be opened manually if needed.
+**Native rendering:** On macOS, if [Glimpse](https://github.com/hazat/glimpse) is installed (`pi install npm:glimpseui`), UIs open in a native WKWebView window instead of a browser tab. Set `MCP_UI_VIEWER=browser` to force the browser, `MCP_UI_VIEWER=glimpse` to require native rendering, or `MCP_UI_VIEWER=none` (also accepts `off` / `disabled`) to suppress the window entirely — the tool still runs and its inline result is returned to the agent, but no browser or native window opens. This is useful for headless setups, CI, or users who want the tool output delivered inline as text only. When suppressed, a one-line info notification shows the UI URL so it can still be opened manually if needed. Set `MCP_UI_VIEWER=silent` to skip the MCP UI session completely: the tool result is still returned, but the adapter starts no UI or proxy server and emits no UI notification.
 
 **Bidirectional communication:** The UI talks back. When it sends a prompt or intent, the message is stored and `triggerTurn()` wakes the agent. The agent retrieves messages via `mcp({ action: "ui-messages" })` and responds, enabling conversational UIs where the app and agent collaborate in real-time.
 
@@ -987,7 +990,7 @@ Servers that provide usage guidance via the MCP `instructions` field surface it 
 | `/mcp-auth` | Open an OAuth server picker in interactive UI sessions |
 | `/mcp-auth <server>` | OAuth setup for a specific server |
 
-If `settings.autoAuth` is `true`, `mcp({ connect: ... })`, `mcp({ tool: ... })`, and direct tool calls automatically run OAuth when needed and retry once.
+If `settings.autoAuth` is `true`, `mcp({ connect: ... })`, `mcp({ tool: ... })`, direct tool calls, and interactive `auth-start` actions use the same complete Pi browser flow. Connect and tool calls retry once after authorization. By default, this flow offers pasted callback input after 10 seconds; set `settings.manualOAuthCallbackFallback` to `false` when localhost ports are forwarded reliably so Pi waits only for automatic callback delivery.
 
 In interactive sessions, you can also authenticate from `/mcp` with `ctrl+a` or Enter on a server that needs auth. `/mcp-auth` without a server only opens a picker in the interactive UI. For gateway authorization and manual callback completion, see [Remote/headless OAuth](#remoteheadless-oauth).
 

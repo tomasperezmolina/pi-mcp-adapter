@@ -15,6 +15,7 @@ import { guardMcpOutput, guardedMcpDetails, resolveMcpOutputGuardOptions } from 
 import { maybeStartUiSession, summarizeUiSessionResult, type UiSessionRuntime } from "./ui-session.ts";
 import { formatAuthRequiredMessage, formatMcpStatus, normalizeToolArguments, resolveServerUrl, truncateAtWord } from "./utils.ts";
 import { authenticate, completeAuthFromInput, getAuthStatus, startAuth, supportsOAuth } from "./mcp-auth-flow.ts";
+import { createInteractiveOAuthHandlers } from "./mcp-auth-ui.ts";
 import { SessionRecoveryAuthRequiredError, withSessionRecovery } from "./session-recovery.ts";
 import { callToolViaTaskSession } from "./mcp-tasks.ts";
 import { paginate, rankSuggestions, rankToolMatches, resolveSearchKeywords } from "./search-ranking.ts";
@@ -384,23 +385,23 @@ async function attemptAutoAuth(
     };
   }
 
+  if (state.ui) {
+    state.ui.setStatus("mcp", formatMcpStatus(state.config, `authenticating ${serverName}...`));
+  }
   try {
-    if (state.authStorageOptions) {
-      await authenticate(
-        serverName,
-        serverUrl,
-        definition,
-        signal
-          ? { authStorageOptions: state.authStorageOptions, signal, runtime: state.oauthRuntime }
-          : { authStorageOptions: state.authStorageOptions, runtime: state.oauthRuntime },
-      );
-    } else {
-      if (signal) {
-        await authenticate(serverName, serverUrl, definition, { signal, runtime: state.oauthRuntime });
-      } else {
-        await authenticate(serverName, serverUrl, definition, { runtime: state.oauthRuntime });
-      }
-    }
+    await authenticate(serverName, serverUrl, definition, {
+      ...(state.authStorageOptions ? { authStorageOptions: state.authStorageOptions } : {}),
+      ...(state.ui
+        ? createInteractiveOAuthHandlers(serverName, {
+            ui: state.ui,
+            openBrowser: state.openBrowser,
+            copyText: state.copyText,
+            manualCallbackFallback: state.config.settings?.manualOAuthCallbackFallback !== false,
+          })
+        : {}),
+      ...(signal ? { signal } : {}),
+      ...(state.oauthRuntime ? { runtime: state.oauthRuntime } : {}),
+    });
     return { status: "success" };
   } catch (error) {
     if (isAbortError(error, signal)) throw error;
@@ -409,6 +410,8 @@ async function attemptAutoAuth(
       status: "failed",
       message: getAuthFailedMessage(state, serverName, message),
     };
+  } finally {
+    updateStatusBar(state);
   }
 }
 
@@ -613,6 +616,28 @@ export async function executeAuthStart(state: McpExtensionState, serverName: str
       };
     }
 
+    // Keep the explicit tool action aligned with connect/tool auto-auth in an
+    // interactive session. The two-phase copy/paste protocol remains available
+    // for non-UI callers and installations that have not enabled auto-auth.
+    if (state.ui && state.config.settings?.autoAuth === true) {
+      const autoAuth = await attemptAutoAuth(state, serverName, ownedSignal);
+      if (autoAuth.status === "failed") {
+        return {
+          content: [{ type: "text" as const, text: autoAuth.message }],
+          details: { mode: "auth-start", error: "auth_start_failed", server: serverName, message: autoAuth.message },
+        };
+      }
+      if (autoAuth.status === "success") {
+        await state.manager.close(serverName);
+        clearFailure(state, serverName);
+        updateStatusBar(state);
+        return {
+          content: [{ type: "text" as const, text: `OAuth authentication successful for "${serverName}".` }],
+          details: { mode: "auth-start", server: serverName, authenticated: true },
+        };
+      }
+    }
+
     const { authorizationUrl } = state.authStorageOptions
       ? ownedSignal
         ? await startAuth(serverName, serverUrl, definition, { authStorageOptions: state.authStorageOptions, signal: ownedSignal, runtime: state.oauthRuntime })
@@ -642,6 +667,7 @@ export async function executeAuthStart(state: McpExtensionState, serverName: str
       details: { mode: "auth-start", server: serverName, authorizationUrl },
     };
   } catch (error) {
+    if (isAbortError(error, ownedSignal)) throw error;
     const message = error instanceof Error ? error.message : String(error);
     return {
       content: [{ type: "text" as const, text: `Failed to start OAuth for "${serverName}": ${message}` }],
@@ -685,6 +711,7 @@ export async function executeAuthComplete(state: McpExtensionState, serverName: 
       details: { mode: "auth-complete", server: serverName, authenticated: true },
     };
   } catch (error) {
+    if (isAbortError(error, ownedSignal)) throw error;
     const message = error instanceof Error ? error.message : String(error);
     return {
       content: [{ type: "text" as const, text: `Failed to complete OAuth for "${serverName}": ${message}` }],
@@ -1106,6 +1133,7 @@ export async function executeConnect(state: McpExtensionState, serverName: strin
       }
       if (connection.status === "needs-auth") {
         const message = getAuthRequiredMessage(state, serverName);
+        updateStatusBar(state);
         return {
           content: [{ type: "text" as const, text: message }],
           details: { mode: "connect", error: "auth_required", server: serverName, message },
@@ -1443,6 +1471,7 @@ export async function executeCall(
 
         if (connection.status === "needs-auth") {
           const message = getAuthRequiredMessage(state, serverName);
+          updateStatusBar(state);
           return {
             content: [{ type: "text" as const, text: message }],
             details: { mode: "call", error: "auth_required", ...callIdentity, message },
@@ -1655,17 +1684,23 @@ export async function executeCall(
 
       const content = resolveMcpResultContent(result as Record<string, unknown>, state.owner?.signal);
       const outputContent = content.length > 0 ? content : [{ type: "text" as const, text: "(empty result)" }];
-      const uiSummary = summarizeUiSessionResult(uiSession);
-      const guarded = await guardMcpOutput(outputContent, { ...outputGuardOptions, suffix: `\n\n${uiSummary.message}`, rawMcpResult: result });
+      const uiSummary = uiSession ? summarizeUiSessionResult(uiSession) : undefined;
+      const guarded = await guardMcpOutput(outputContent, {
+        ...outputGuardOptions,
+        ...(uiSummary ? { suffix: `\n\n${uiSummary.message}` } : {}),
+        rawMcpResult: result,
+      });
       return {
         content: guarded.content,
         details: {
           mode: "call",
           ...guardedMcpDetails(guarded),
           ...callIdentity,
-          uiOpen: uiSummary.uiOpen,
-          uiViewer: uiSummary.uiViewer,
-          uiUrl: uiSummary.uiUrl,
+          ...(uiSummary ? {
+            uiOpen: uiSummary.uiOpen,
+            uiViewer: uiSummary.uiViewer,
+            uiUrl: uiSummary.uiUrl,
+          } : {}),
         },
       };
     }

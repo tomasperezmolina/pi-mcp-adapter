@@ -39,6 +39,8 @@ const KEYRING_RECOVERY_HELPER_ENV = 'PI_MCP_ADAPTER_KEYRING_RECOVERY_HELPER';
 const TEST_LINUX_KEYRING_RECOVERY_ENV = 'PI_MCP_ADAPTER_TEST_LINUX_KEYRING_RECOVERY';
 const AUTH_CACHE_DISABLED_ENV = 'PI_MCP_ADAPTER_DISABLE_AUTH_CACHE';
 const KEYRING_RECOVERY_TIMEOUT_MS = 10_000;
+/** Reused so chunked entries share one recoverable Linux session keyring. */
+const KEYRING_RECOVERY_SESSION = AUTH_SECRET_SERVICE;
 const AUTH_CHUNK_MANIFEST_KEY = '__piMcpAdapterOAuthChunked';
 const OAUTH_FILE_KEY_ENV = 'PI_MCP_ADAPTER_OAUTH_FILE_KEY';
 const ENCRYPTED_FILE_AAD_CONTEXT = 'pi-mcp-adapter.oauth.encrypted-file.v1';
@@ -525,8 +527,19 @@ function formatErrorMessage(error: unknown): string {
 
 type KeyringRecoveryOperation = 'read' | 'write' | 'remove';
 
+interface KeyringRecoveryOperationRequest {
+  operation: KeyringRecoveryOperation;
+  account: string;
+  payload?: string;
+}
+
+interface KeyringRecoveryOperationResult {
+  found?: boolean;
+  value?: string;
+}
+
 type KeyringRecoveryResponse =
-  | { ok: true; found?: boolean; value?: string }
+  | { ok: true; results: KeyringRecoveryOperationResult[] }
   | { ok: false; error?: string };
 
 function isLinuxKeyringRecoveryEnabled(): boolean {
@@ -539,13 +552,16 @@ function shouldAttemptLinuxKeyringRecovery(error: unknown): boolean {
     && causeChainContains(error, /key\s*(?:has been\s*)?revoked|keyrevoked/i);
 }
 
-function runLinuxKeyringRecoveryOperation(operation: KeyringRecoveryOperation, account: string, payload?: string): KeyringRecoveryResponse {
+function runLinuxKeyringRecoveryBatch(operations: KeyringRecoveryOperationRequest[]): KeyringRecoveryOperationResult[] {
+  if (operations.length === 0) return [];
   const keyctl = process.env[KEYRING_RECOVERY_KEYCTL_ENV]?.trim() || 'keyctl';
   const node = process.env[KEYRING_RECOVERY_NODE_ENV]?.trim() || 'node';
   const helper = process.env[KEYRING_RECOVERY_HELPER_ENV]?.trim()
     || fileURLToPath(new URL('./mcp-keyring-helper.cjs', import.meta.url));
-  const request = JSON.stringify({ operation, service: AUTH_SECRET_SERVICE, account, payload });
-  const result = spawnSync(keyctl, ['session', '-', node, helper], {
+  const request = JSON.stringify({
+    operations: operations.map(operation => ({ ...operation, service: AUTH_SECRET_SERVICE })),
+  });
+  const result = spawnSync(keyctl, ['session', KEYRING_RECOVERY_SESSION, node, helper], {
     input: `${request}\n`,
     encoding: 'utf8',
     maxBuffer: 1024 * 1024,
@@ -555,9 +571,6 @@ function runLinuxKeyringRecoveryOperation(operation: KeyringRecoveryOperation, a
 
   if (result.error) {
     throw new Error(`Linux keyring recovery helper could not start: ${result.error.message}`, { cause: result.error });
-  }
-  if (result.status !== 0) {
-    throw new Error(`Linux keyring recovery helper failed with exit code ${result.status ?? 'unknown'}`);
   }
 
   let response: unknown;
@@ -573,24 +586,42 @@ function runLinuxKeyringRecoveryOperation(operation: KeyringRecoveryOperation, a
   if (typedResponse.ok === false) {
     throw new Error(typedResponse.error || 'Linux keyring recovery helper failed');
   }
-  if (operation === 'read' && typedResponse.found === true && typeof typedResponse.value !== 'string') {
-    throw new Error('Linux keyring recovery helper returned an invalid read response');
+  if (result.status !== 0) {
+    throw new Error(`Linux keyring recovery helper failed with exit code ${result.status ?? 'unknown'}`);
   }
-  return typedResponse;
+  if (!Array.isArray(typedResponse.results) || typedResponse.results.length !== operations.length) {
+    throw new Error('Linux keyring recovery helper returned an invalid batch response');
+  }
+  for (const [index, operation] of operations.entries()) {
+    const operationResult: unknown = typedResponse.results[index];
+    if (typeof operationResult !== 'object' || operationResult === null || Array.isArray(operationResult)) {
+      throw new Error('Linux keyring recovery helper returned an invalid operation result');
+    }
+    if (operation.operation === 'read') {
+      const readResult = operationResult as { found?: unknown; value?: unknown };
+      if (typeof readResult.found !== 'boolean'
+        || (readResult.found === true && typeof readResult.value !== 'string')
+        || (readResult.found === false && readResult.value !== undefined)) {
+        throw new Error('Linux keyring recovery helper returned an invalid read response');
+      }
+    }
+  }
+  return typedResponse.results;
 }
 
-const linuxKeyringRecoveryAuthSecretStore: AuthSecretStore = {
-  read(account) {
-    const response = runLinuxKeyringRecoveryOperation('read', account);
-    return response.ok && response.found === true ? response.value : undefined;
-  },
-  write(account, payload) {
-    runLinuxKeyringRecoveryOperation('write', account, payload);
-  },
-  remove(account) {
-    runLinuxKeyringRecoveryOperation('remove', account);
-  },
-};
+function runLinuxKeyringRecoveryOperation(
+  operation: KeyringRecoveryOperation,
+  account: string,
+  payload?: string,
+): KeyringRecoveryOperationResult {
+  const result = runLinuxKeyringRecoveryBatch([{
+    operation,
+    account,
+    ...(payload !== undefined ? { payload } : {}),
+  }])[0];
+  if (!result) throw new Error('Linux keyring recovery helper returned no result');
+  return result;
+}
 
 export function loadTestKeyringEntryClass(keyringRequire: KeyringRequire, platform: NodeJS.Platform, arch: NodeJS.Architecture): KeyringEntryConstructor {
   return loadKeyringEntryClass(keyringRequire, platform, arch);
@@ -926,12 +957,89 @@ function publishAuthEntryToCache(serverName: string, payload: string, options?: 
   authEntryCache.set(cacheKey, cloneAuthEntry(normalized));
 }
 
+function writeSecureAuthEntryViaLinuxRecovery(
+  serverName: string,
+  entry: AuthEntry,
+  options?: AuthStorageOptions,
+): void {
+  authEntryCache.delete(authEntryCacheKey(serverName, options, 'write'));
+  const account = getAuthEntryAccount(serverName);
+  const payload = JSON.stringify(entry);
+  const chunks = payload.length > AUTH_SECRET_CHUNK_SIZE ? splitAuthPayload(payload) : undefined;
+  const manifest = chunks ? createChunkManifest(payload, chunks.length) : undefined;
+  let previousManifest: AuthEntryChunkManifest | undefined;
+  try {
+    const previousPayload = runLinuxKeyringRecoveryOperation('read', account);
+    if (previousPayload.found === true && previousPayload.value !== undefined) {
+      try {
+        previousManifest = readChunkManifestFromPayload(serverName, previousPayload.value, 'OS secure credential store');
+      } catch {
+        previousManifest = undefined;
+      }
+    }
+
+    if (previousManifest && !manifest) {
+      runLinuxKeyringRecoveryBatch([{ operation: 'write', account, payload }]);
+      try {
+        runLinuxKeyringRecoveryBatch(getAuthEntryChunkAccounts(account, previousManifest)
+          .map(chunkAccount => ({ operation: 'remove' as const, account: chunkAccount })));
+      } catch {
+        // Keep the successful replacement authoritative if stale-chunk cleanup fails.
+      }
+      publishAuthEntryToCache(serverName, payload, options);
+      return;
+    }
+
+    if (previousManifest && manifest?.chunkDigest === previousManifest.chunkDigest) {
+      publishAuthEntryToCache(serverName, payload, options);
+      return;
+    }
+
+    if (previousManifest) {
+      runLinuxKeyringRecoveryBatch(getAuthEntryChunkAccounts(account, previousManifest)
+        .map(chunkAccount => ({ operation: 'remove' as const, account: chunkAccount })));
+    }
+
+    const operations: KeyringRecoveryOperationRequest[] = [];
+    if (manifest && chunks) {
+      for (const [index, chunk] of chunks.entries()) {
+        operations.push({
+          operation: 'write',
+          account: getAuthEntryChunkAccount(account, manifest, index),
+          payload: chunk,
+        });
+      }
+      operations.push({ operation: 'write', account, payload: JSON.stringify(manifest) });
+    } else {
+      operations.push({ operation: 'write', account, payload });
+    }
+    runLinuxKeyringRecoveryBatch(operations);
+  } catch (error) {
+    const newChunkAccounts = manifest ? getAuthEntryChunkAccounts(account, manifest) : [];
+    if (newChunkAccounts.length > 0) {
+      try {
+        runLinuxKeyringRecoveryBatch(newChunkAccounts
+          .map(chunkAccount => ({ operation: 'remove' as const, account: chunkAccount })));
+      } catch {
+        // Preserve the original failure when partial-chunk cleanup also fails.
+      }
+    }
+    throw new OAuthCredentialStoreError(
+      `Failed to write OAuth credentials for ${serverName} to the OS secure credential store`,
+      'write',
+      error,
+    );
+  }
+
+  publishAuthEntryToCache(serverName, payload, options);
+}
+
 function writeSecureAuthEntry(serverName: string, entry: AuthEntry, options?: AuthStorageOptions): void {
   try {
     writeSecureAuthEntryToStore(getAuthSecretStore(options), serverName, entry);
   } catch (error) {
     if (options?.credentialStore === 'encrypted-file' || !shouldAttemptLinuxKeyringRecovery(error)) throw error;
-    writeSecureAuthEntryToStore(linuxKeyringRecoveryAuthSecretStore, serverName, entry);
+    writeSecureAuthEntryViaLinuxRecovery(serverName, entry, options);
   }
   publishAuthEntryToCache(serverName, JSON.stringify(entry), options);
 }
@@ -982,6 +1090,65 @@ function readAuthEntryFromStore(
   return legacyEntry;
 }
 
+function readAuthEntryFromLinuxRecovery(
+  serverName: string,
+  options?: AuthStorageOptions,
+  behavior: { migrateLegacy?: boolean } = {},
+): AuthEntry | undefined {
+  const account = getAuthEntryAccount(serverName);
+  let payload: string | undefined;
+  try {
+    const main = runLinuxKeyringRecoveryOperation('read', account);
+    payload = main.found === true ? main.value : undefined;
+  } catch (error) {
+    throw new OAuthCredentialStoreError(
+      `Failed to read OAuth credentials for ${serverName} from the OS secure credential store`,
+      'read',
+      error,
+    );
+  }
+
+  if (payload !== undefined) {
+    const manifest = readChunkManifestFromPayload(serverName, payload, 'OS secure credential store');
+    let entry: AuthEntry;
+    if (manifest) {
+      let chunks: KeyringRecoveryOperationResult[];
+      try {
+        chunks = runLinuxKeyringRecoveryBatch(getAuthEntryChunkAccounts(account, manifest)
+          .map(chunkAccount => ({ operation: 'read' as const, account: chunkAccount })));
+      } catch (error) {
+        throw new OAuthCredentialStoreError(
+          `Failed to read OAuth credentials for ${serverName} from the OS secure credential store`,
+          'read',
+          error,
+        );
+      }
+      const joined = chunks.map((chunk, index) => {
+        if (chunk.found !== true || chunk.value === undefined) {
+          throw new OAuthCredentialStoreError(
+            `Failed to read OAuth credentials for ${serverName} from the OS secure credential store`,
+            'read',
+            new Error(`Missing OAuth credential chunk ${index} for ${serverName}`),
+          );
+        }
+        return chunk.value;
+      }).join('');
+      entry = parseAuthEntryPayload(serverName, joined, 'OS secure credential store chunks');
+    } else {
+      entry = parseAuthEntryPayload(serverName, payload, 'OS secure credential store');
+    }
+    removeLegacyAuthEntry(serverName, options);
+    return entry;
+  }
+
+  const legacyEntry = readLegacyAuthEntry(serverName, options);
+  if (!legacyEntry) return undefined;
+  if (behavior.migrateLegacy === false) return legacyEntry;
+  writeSecureAuthEntryViaLinuxRecovery(serverName, legacyEntry);
+  removeLegacyAuthEntry(serverName, options);
+  return legacyEntry;
+}
+
 function readAuthEntry(
   serverName: string,
   options?: AuthStorageOptions,
@@ -1000,7 +1167,7 @@ function readAuthEntry(
     entry = readAuthEntryFromStore(getAuthSecretStore(options), serverName, options, behavior);
   } catch (error) {
     if (options?.credentialStore === 'encrypted-file' || !shouldAttemptLinuxKeyringRecovery(error)) throw error;
-    entry = readAuthEntryFromStore(linuxKeyringRecoveryAuthSecretStore, serverName, options, behavior);
+    entry = readAuthEntryFromLinuxRecovery(serverName, options, behavior);
   }
 
   if (cacheable) authEntryCache.set(cacheKey, cloneAuthEntry(entry));
@@ -1087,12 +1254,37 @@ function removeAuthEntryFromStore(store: AuthSecretStore, serverName: string): v
   }
 }
 
+function removeAuthEntryViaLinuxRecovery(serverName: string): void {
+  authEntryCache.delete(authEntryCacheKey(serverName, undefined, 'remove'));
+  const account = getAuthEntryAccount(serverName);
+  try {
+    const main = runLinuxKeyringRecoveryOperation('read', account);
+    const manifest = main.found === true && main.value !== undefined
+      ? readChunkManifestFromPayload(serverName, main.value, 'OS secure credential store')
+      : undefined;
+    const operations: KeyringRecoveryOperationRequest[] = [
+      ...(manifest
+        ? getAuthEntryChunkAccounts(account, manifest)
+          .map(chunkAccount => ({ operation: 'remove' as const, account: chunkAccount }))
+        : []),
+      { operation: 'remove', account },
+    ];
+    runLinuxKeyringRecoveryBatch(operations);
+  } catch (error) {
+    throw new OAuthCredentialStoreError(
+      `Failed to remove OAuth credentials for ${serverName} from the OS secure credential store`,
+      'remove',
+      error,
+    );
+  }
+}
+
 export function removeAuthEntry(serverName: string, options?: AuthStorageOptions): void {
   try {
     removeAuthEntryFromStore(getAuthSecretStore(options), serverName);
   } catch (error) {
     if (options?.credentialStore === 'encrypted-file' || !shouldAttemptLinuxKeyringRecovery(error)) throw error;
-    removeAuthEntryFromStore(linuxKeyringRecoveryAuthSecretStore, serverName);
+    removeAuthEntryViaLinuxRecovery(serverName);
   }
   evictAuthEntryCache(serverName, options);
   if (options?.credentialStore !== 'encrypted-file') removeLegacyAuthEntry(serverName, options);

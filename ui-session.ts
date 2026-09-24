@@ -210,6 +210,8 @@ export async function maybeStartUiSession(
 
   try {
     throwIfAborted(runtimeSignal);
+    const viewerPref = process.env.MCP_UI_VIEWER?.toLowerCase();
+    if (viewerPref === "silent") return null;
     if (
       state.uiServer &&
       state.uiServer.serverName === request.serverName &&
@@ -471,7 +473,6 @@ export async function maybeStartUiSession(
 
     state.uiServer = handle;
 
-    const viewerPref = process.env.MCP_UI_VIEWER?.toLowerCase();
     const uiSuppressed = viewerPref === "none" || viewerPref === "off" || viewerPref === "disabled";
 
     let viewer: UiSessionViewer = "browser";

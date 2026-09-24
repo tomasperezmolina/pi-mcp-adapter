@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   lazyConnect: vi.fn(),
   getFailureAgeSeconds: vi.fn(),
   clearFailure: vi.fn(),
+  updateStatusBar: vi.fn(),
   authenticate: vi.fn(),
   supportsOAuth: vi.fn(),
 }));
@@ -13,6 +14,7 @@ vi.mock("../init.ts", () => ({
   lazyConnect: mocks.lazyConnect,
   getFailureAgeSeconds: mocks.getFailureAgeSeconds,
   clearFailure: mocks.clearFailure,
+  updateStatusBar: mocks.updateStatusBar,
 }));
 
 vi.mock("../mcp-auth-flow.ts", () => ({
@@ -26,11 +28,12 @@ describe("direct tools auto auth", () => {
     mocks.lazyConnect.mockReset();
     mocks.getFailureAgeSeconds.mockReset().mockReturnValue(null);
     mocks.clearFailure.mockReset();
+    mocks.updateStatusBar.mockReset();
     mocks.authenticate.mockReset().mockResolvedValue("authenticated");
     mocks.supportsOAuth.mockReset().mockReturnValue(true);
   });
 
-  it("auto-authenticates and retries direct tool execution once", async () => {
+  it("auto-authenticates and retries direct tool execution once without manual input when disabled", async () => {
     const { createDirectToolExecutor } = await import("../direct-tools.ts");
 
     let connection: any = { status: "needs-auth" };
@@ -53,7 +56,7 @@ describe("direct tools auto auth", () => {
 
     const state = {
       config: {
-        settings: { autoAuth: true },
+        settings: { autoAuth: true, manualOAuthCallbackFallback: false },
         mcpServers: {
           demo: { url: "https://api.example.com/mcp", auth: "oauth" },
         },
@@ -100,8 +103,13 @@ describe("direct tools auto auth", () => {
       "demo",
       "https://api.example.com/mcp",
       state.config.mcpServers.demo,
-      { signal: controller.signal },
+      expect.objectContaining({
+        signal: controller.signal,
+        onAuthorizationUrl: expect.any(Function),
+      }),
     );
+    expect(mocks.authenticate.mock.calls[0][3].onAuthorizationInput).toBeUndefined();
+    expect(state.ui.setStatus).toHaveBeenCalledWith("mcp", expect.stringContaining("authenticating demo"));
     expect(state.manager.close).toHaveBeenCalledWith("demo");
     expect(state.manager.getRequestOptions).toHaveBeenCalledWith("demo", controller.signal);
     expect(connected.client.callTool).toHaveBeenCalledWith({
@@ -191,7 +199,11 @@ describe("direct tools auto auth", () => {
       "demo",
       "https://api.example.com/mcp",
       state.config.mcpServers.demo,
-      { signal: controller.signal },
+      expect.objectContaining({
+        signal: controller.signal,
+        onAuthorizationUrl: expect.any(Function),
+        onAuthorizationInput: expect.any(Function),
+      }),
     );
   });
 

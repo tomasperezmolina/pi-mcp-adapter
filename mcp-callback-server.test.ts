@@ -61,7 +61,7 @@ describe("mcp-callback-server", () => {
       await ensureCallbackServer({ oauthState: "reserved-initial-state", reserveState: true })
 
       await assert.rejects(
-        async () => await ensureCallbackServer({ callbackHost: "127.0.0.1" }),
+        async () => await ensureCallbackServer({ callbackHost: "localhost" }),
         /cannot be switched while authorizations are pending/
       )
 
@@ -72,7 +72,7 @@ describe("mcp-callback-server", () => {
       await ensureCallbackServer({ oauthState: "reserved-host-state", reserveState: true })
 
       await assert.rejects(
-        async () => await ensureCallbackServer({ callbackHost: "127.0.0.1" }),
+        async () => await ensureCallbackServer({ callbackHost: "localhost" }),
         /cannot be switched while authorizations are pending/
       )
 
@@ -100,7 +100,7 @@ describe("mcp-callback-server", () => {
 
       await new Promise<void>((resolve, reject) => {
         blocker.once("error", reject)
-        blocker.listen(port, "localhost", resolve)
+        blocker.listen(port, "127.0.0.1", resolve)
       })
 
       try {
@@ -141,7 +141,7 @@ describe("mcp-callback-server", () => {
 
       await new Promise<void>((resolve, reject) => {
         blocker.once("error", reject)
-        blocker.listen(port, "localhost", resolve)
+        blocker.listen(port, "127.0.0.1", resolve)
       })
 
       try {
@@ -164,7 +164,7 @@ describe("mcp-callback-server", () => {
       try {
         await new Promise<void>((resolve, reject) => {
           blocker.once("error", reject)
-          blocker.listen(configuredPort, "localhost", resolve)
+          blocker.listen(configuredPort, "127.0.0.1", resolve)
         })
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "EADDRINUSE") return
@@ -178,7 +178,7 @@ describe("mcp-callback-server", () => {
 
         const state = "occupied-port-state"
         const callbackPromise = waitForCallback(state)
-        const response = await fetch(`http://localhost:${callbackPort}/callback?code=ok&state=${state}`)
+        const response = await fetch(`http://127.0.0.1:${callbackPort}/callback?code=ok&state=${state}`)
         assert.strictEqual(response.status, 200)
         assert.strictEqual((await callbackPromise).code, "ok")
 

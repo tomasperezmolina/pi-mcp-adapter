@@ -98,23 +98,23 @@ describe("mcp-callback-server", () => {
     mocks.setOAuthCallbackPort.mockClear();
   });
 
-  it("binds localhost on an OS-assigned port and unrefs after a successful non-strict bind", async () => {
+  it("binds IPv4 loopback on an OS-assigned port and unrefs after a successful non-strict bind", async () => {
     const { ensureCallbackServer } = await import("../mcp-callback-server.ts");
 
     await ensureCallbackServer();
 
-    expect(mocks.runtime.servers[0]?.listen).toHaveBeenCalledWith(0, "localhost", expect.any(Function));
+    expect(mocks.runtime.servers[0]?.listen).toHaveBeenCalledWith(0, "127.0.0.1", expect.any(Function));
     expect(mocks.runtime.servers[0]?.unref).toHaveBeenCalledTimes(1);
     expect(mocks.state.activePort).toBe(4338);
   });
 
-  it("binds the configured localhost port exactly in strict mode", async () => {
+  it("binds the configured IPv4 loopback port exactly in strict mode", async () => {
     const { ensureCallbackServer } = await import("../mcp-callback-server.ts");
 
     await ensureCallbackServer({ strictPort: true });
 
-    expect(mocks.runtime.servers[0]?.listen).toHaveBeenCalledWith(4337, "localhost", expect.any(Function));
-    expect(mocks.runtime.servers[0]?.listen).not.toHaveBeenCalledWith(0, "localhost", expect.any(Function));
+    expect(mocks.runtime.servers[0]?.listen).toHaveBeenCalledWith(4337, "127.0.0.1", expect.any(Function));
+    expect(mocks.runtime.servers[0]?.listen).not.toHaveBeenCalledWith(0, "127.0.0.1", expect.any(Function));
     expect(mocks.state.activePort).toBe(4337);
   });
 
@@ -319,7 +319,7 @@ describe("mcp-callback-server", () => {
     await ensureCallbackServer({ strictPort: true });
 
     expect(mocks.runtime.servers[0]?.close).toHaveBeenCalledTimes(1);
-    expect(mocks.runtime.servers[1]?.listen).toHaveBeenCalledWith(4337, "localhost", expect.any(Function));
+    expect(mocks.runtime.servers[1]?.listen).toHaveBeenCalledWith(4337, "127.0.0.1", expect.any(Function));
     expect(mocks.state.activePort).toBe(4337);
   });
 

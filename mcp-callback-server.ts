@@ -197,7 +197,8 @@ interface EnsureCallbackServerOptions {
   reserveState?: boolean
 }
 
-const DEFAULT_OAUTH_CALLBACK_HOST = "localhost"
+// Keep listener and advertised callback on one deterministic loopback family.
+const DEFAULT_OAUTH_CALLBACK_HOST = "127.0.0.1"
 let callbackServerHost = DEFAULT_OAUTH_CALLBACK_HOST
 
 /**

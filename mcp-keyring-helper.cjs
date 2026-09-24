@@ -60,28 +60,32 @@ function writeResponse(response) {
   try {
     const request = JSON.parse(await readStdin());
     if (!request || typeof request !== 'object') throw new Error('invalid request');
-    const { operation, service, account, payload } = request;
-    if (!['read', 'write', 'remove'].includes(operation)) throw new Error('invalid operation');
-    if (typeof service !== 'string' || !service) throw new Error('invalid service');
-    if (typeof account !== 'string' || !account) throw new Error('invalid account');
+    const batched = Array.isArray(request.operations);
+    const operations = batched ? request.operations : [request];
+    if (operations.length === 0) throw new Error('empty operation batch');
 
     const Entry = loadKeyringEntryClass();
-    const entry = new Entry(service, account);
+    const results = operations.map(({ operation, service, account, payload }) => {
+      if (!['read', 'write', 'remove'].includes(operation)) throw new Error('invalid operation');
+      if (typeof service !== 'string' || !service) throw new Error('invalid service');
+      if (typeof account !== 'string' || !account) throw new Error('invalid account');
 
-    if (operation === 'read') {
-      const value = entry.getPassword();
-      writeResponse(value === null ? { ok: true, found: false } : { ok: true, found: true, value });
-      return;
-    }
-    if (operation === 'write') {
-      if (typeof payload !== 'string') throw new Error('invalid payload');
-      entry.setPassword(payload);
-      writeResponse({ ok: true });
-      return;
-    }
+      const entry = new Entry(service, account);
+      if (operation === 'read') {
+        const value = entry.getPassword();
+        return value === null ? { found: false } : { found: true, value };
+      }
+      if (operation === 'write') {
+        if (typeof payload !== 'string') throw new Error('invalid payload');
+        entry.setPassword(payload);
+        return {};
+      }
 
-    entry.deleteCredential();
-    writeResponse({ ok: true });
+      entry.deleteCredential();
+      return {};
+    });
+
+    writeResponse(batched ? { ok: true, results } : { ok: true, ...results[0] });
   } catch (error) {
     writeResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
     process.exitCode = 1;

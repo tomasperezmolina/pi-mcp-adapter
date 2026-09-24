@@ -10,7 +10,7 @@ import { cloneBuiltInAgentPluginEntry, isBuiltInAgentPlugin, mergeBuiltInAgentPl
 import { loadClaudePluginBundles } from "./claude-plugin-loader.ts";
 import { loadPackageMcpConfigs } from "./package-mcp-loader.ts";
 import { validateJevSettings } from "./jev-client.ts";
-import { formatServerNamespace, isServerDisabled, type ClaudePluginConfig, type HostConfigDiscovery, type McpConfig, type ServerEntry, type McpSettings, type ImportKind, type ServerProvenance } from "./types.ts";
+import { formatServerNamespace, isServerDisabled, type ClaudePluginConfig, type HostConfigDiscovery, type ProjectConfigDiscovery, type McpConfig, type ServerEntry, type McpSettings, type ImportKind, type ServerProvenance } from "./types.ts";
 import { parseJsonWithComments, toStringRecord } from "./utils.ts";
 
 const GENERIC_GLOBAL_CONFIG_PATH = join(homedir(), ".config", "mcp", "mcp.json");
@@ -106,6 +106,16 @@ interface ConfigSourceSpec {
   scope: "global" | "project";
 }
 
+export interface McpConfigResolutionOptions {
+  projectConfigDiscovery?: ProjectConfigDiscovery;
+}
+
+interface ConfigSourcePlan {
+  all: ConfigSourceSpec[];
+  active: ConfigSourceSpec[];
+  projectConfigDiscovery: ProjectConfigDiscovery;
+}
+
 export interface ConfigDiscoveryPath {
   label: string;
   path: string;
@@ -121,6 +131,7 @@ export interface ConfigDiscoverySource extends ConfigDiscoveryPath {
   id: ConfigSourceSpec["id"];
   scope: ConfigSourceSpec["scope"];
   kind: "shared" | "pi";
+  active: boolean;
   serverCount: number;
 }
 
@@ -152,6 +163,7 @@ export interface McpDiscoverySummary {
   imports: ImportConfigSummary[];
   hostConfigs: HostConfigSummary[];
   hostConfigDiscovery: HostConfigDiscovery;
+  projectConfigDiscovery: ProjectConfigDiscovery;
   agentPlugins: AgentPluginSummary[];
   conflicts: McpConfigConflict[];
   hasAnyConfig: boolean;
@@ -200,20 +212,28 @@ export function getSharedConfigPath(target: SharedConfigTarget, cwd = process.cw
   return target === "project" ? getProjectConfigPath(cwd) : getGenericGlobalConfigPath();
 }
 
-export function getConfigDiscoveryPaths(overridePath?: string, cwd = process.cwd()): ConfigDiscoveryPath[] {
-  return getConfigSources(overridePath, cwd).map((source) => ({
+export function getConfigDiscoveryPaths(
+  overridePath?: string,
+  cwd = process.cwd(),
+  options: McpConfigResolutionOptions = {},
+): ConfigDiscoveryPath[] {
+  return getConfigSourcePlan(overridePath, cwd, options).all.map((source) => ({
     label: source.label,
     path: source.readPath,
     exists: existsSync(source.readPath),
   }));
 }
 
-export function findAvailableImportConfigs(cwd = process.cwd()): DiscoveredImportConfig[] {
+export function findAvailableImportConfigs(
+  cwd = process.cwd(),
+  options: McpConfigResolutionOptions = {},
+): DiscoveredImportConfig[] {
   if (isExclusiveConfigMode()) return [];
   const discovered: DiscoveredImportConfig[] = [];
+  const includeProjectConfigs = getConfigSourcePlan(undefined, cwd, options).projectConfigDiscovery === "on";
 
   for (const importKind of Object.keys(IMPORT_PATHS) as ImportKind[]) {
-    const importPath = resolveImportPath(importKind, cwd);
+    const importPath = resolveImportPath(importKind, cwd, includeProjectConfigs);
     if (importPath) {
       discovered.push({ kind: importKind, path: importPath });
     }
@@ -222,9 +242,15 @@ export function findAvailableImportConfigs(cwd = process.cwd()): DiscoveredImpor
   return discovered;
 }
 
-function getConfigSourceSummaries(sourceSpecs: ConfigSourceSpec[]): ConfigDiscoverySource[] {
+function getConfigSourceSummaries(
+  sourceSpecs: ConfigSourceSpec[],
+  activeSourcePaths = new Set(sourceSpecs.map((source) => source.readPath)),
+): ConfigDiscoverySource[] {
   return sourceSpecs.map((source) => {
-    const loaded = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`);
+    const active = activeSourcePaths.has(source.readPath);
+    const loaded = active
+      ? readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`)
+      : null;
     return {
       id: source.id,
       label: source.label,
@@ -232,27 +258,36 @@ function getConfigSourceSummaries(sourceSpecs: ConfigSourceSpec[]): ConfigDiscov
       exists: existsSync(source.readPath),
       scope: source.scope,
       kind: source.shared ? "shared" : "pi",
+      active,
       serverCount: loaded ? Object.keys(loaded.mcpServers).length : 0,
     } satisfies ConfigDiscoverySource;
   });
 }
 
-export function getMcpStandardConfigSummary(overridePath?: string, cwd = process.cwd()): McpStandardConfigSummary {
-  const sources = getConfigSourceSummaries(getConfigSources(overridePath, cwd));
+export function getMcpStandardConfigSummary(
+  overridePath?: string,
+  cwd = process.cwd(),
+  options: McpConfigResolutionOptions = {},
+): McpStandardConfigSummary {
+  const plan = getConfigSourcePlan(overridePath, cwd, options);
+  const activeSourcePaths = new Set(plan.active.map((source) => source.readPath));
+  const sources = getConfigSourceSummaries(plan.all, activeSourcePaths);
   return {
     sources,
-    hasSharedServers: sources.some((source) => source.kind === "shared" && source.serverCount > 0),
-    fingerprint: JSON.stringify({ sources: sources.map((source) => [source.id, source.exists, source.serverCount]) }),
+    hasSharedServers: sources.some((source) => source.active && source.kind === "shared" && source.serverCount > 0),
+    fingerprint: JSON.stringify({ sources: sources.map((source) => [source.id, source.exists, source.active, source.serverCount]) }),
   };
 }
 
 export function getMcpDiscoverySummary(
   overridePath?: string,
   cwd = process.cwd(),
-  options: { includeHostConfigs?: boolean } = {},
+  options: { includeHostConfigs?: boolean; projectConfigDiscovery?: ProjectConfigDiscovery } = {},
 ): McpDiscoverySummary {
-  const sourceSpecs = getConfigSources(overridePath, cwd);
-  const sources = getConfigSourceSummaries(sourceSpecs);
+  const sourcePlan = getConfigSourcePlan(overridePath, cwd, options);
+  const sourceSpecs = sourcePlan.active;
+  const activeSourcePaths = new Set(sourceSpecs.map((source) => source.readPath));
+  const sources = getConfigSourceSummaries(sourcePlan.all, activeSourcePaths);
   const includeHostConfigs = options.includeHostConfigs !== false;
 
   const importKinds = isExclusiveConfigMode()
@@ -261,7 +296,12 @@ export function getMcpDiscoverySummary(
   const imports = includeHostConfigs
     ? importKinds
       .map((kind) => {
-        const imported = loadImportedConfig(kind, cwd, `Failed to inspect imported MCP config from ${kind}:`);
+        const imported = loadImportedConfig(
+          kind,
+          cwd,
+          `Failed to inspect imported MCP config from ${kind}:`,
+          sourcePlan.projectConfigDiscovery === "on",
+        );
         if (!imported) return null;
         return {
           kind,
@@ -273,16 +313,31 @@ export function getMcpDiscoverySummary(
     : [];
   const hostConfigDiscovery = isExclusiveConfigMode()
     ? "off"
-    : getConfiguredHostConfigDiscovery(overridePath, cwd);
-  const hostConfigs = imports.map((entry) => ({ ...entry, active: hostConfigDiscovery === "on" }));
-  const settings = getMergedSettings(overridePath, cwd);
+    : getConfiguredHostConfigDiscovery(overridePath, cwd, options);
+  const inactiveProjectHostConfigs: HostConfigSummary[] = includeHostConfigs
+    && !isExclusiveConfigMode()
+    && sourcePlan.projectConfigDiscovery === "off"
+    ? (Object.keys(IMPORT_PATHS) as ImportKind[]).flatMap((kind) =>
+      resolveProjectImportCandidates(kind, cwd)
+        .filter((path) => existsSync(path))
+        .map((path) => ({ kind, path, serverCount: 0, active: false })),
+    )
+    : [];
+  const hostConfigs = [
+    ...imports.map((entry) => ({ ...entry, active: hostConfigDiscovery === "on" })),
+    ...inactiveProjectHostConfigs,
+  ];
+  const settings = getMergedSettings(overridePath, cwd, options);
   const agentPlugins = isExclusiveConfigMode()
     ? []
     : getAgentPluginSummaries(settings?.agentPluginPaths, cwd);
   const totalServerCount = sources.reduce((sum, source) => sum + source.serverCount, 0) + agentPlugins.reduce((sum, plugin) => sum + plugin.serverCount, 0);
   const hasSharedServers = sources.some((source) => source.kind === "shared" && source.serverCount > 0) || agentPlugins.some(plugin => plugin.serverCount > 0);
   const hasPiOwnedServers = sources.some((source) => source.kind === "pi" && source.serverCount > 0);
-  const hasAnyDetectedPaths = sources.some((source) => source.exists) || imports.length > 0 || agentPlugins.length > 0;
+  const hasAnyDetectedPaths = sources.some((source) => source.exists)
+    || hostConfigs.length > 0
+    || imports.length > 0
+    || agentPlugins.length > 0;
   const hasAnyConfig = totalServerCount > 0 || imports.some((entry) => entry.serverCount > 0) || hasAnyDetectedPaths;
 
   const summaryWithoutRepoPrompt = {
@@ -290,8 +345,14 @@ export function getMcpDiscoverySummary(
     imports,
     hostConfigs,
     hostConfigDiscovery,
+    projectConfigDiscovery: sourcePlan.projectConfigDiscovery,
     agentPlugins,
-    conflicts: getConfigConflicts(sourceSpecs, imports, cwd),
+    conflicts: getConfigConflicts(
+      sourceSpecs,
+      imports,
+      cwd,
+      sourcePlan.projectConfigDiscovery === "on",
+    ),
     hasAnyConfig,
     hasAnyDetectedPaths,
     hasSharedServers,
@@ -300,10 +361,12 @@ export function getMcpDiscoverySummary(
   };
 
   const fingerprint = JSON.stringify({
-    sources: sources.map((source) => [source.id, source.exists, source.serverCount]),
+    sources: sources.map((source) => [source.id, source.exists, source.active, source.serverCount]),
     imports: imports.map((entry) => [entry.kind, entry.path, entry.serverCount]),
+    hostConfigs: hostConfigs.map((entry) => [entry.kind, entry.path, entry.active, entry.serverCount]),
     agentPlugins: agentPlugins.map((entry) => [entry.path, entry.name, entry.serverCount]),
     hostConfigDiscovery,
+    projectConfigDiscovery: sourcePlan.projectConfigDiscovery,
     conflicts: summaryWithoutRepoPrompt.conflicts,
   });
 
@@ -323,26 +386,40 @@ export function cloneMcpConfig(config: McpConfig): McpConfig {
   return cloned;
 }
 
-export function loadMcpConfig(overridePath?: string, cwd = process.cwd()): McpConfig {
-  const sourceSpecs = getConfigSources(overridePath, cwd);
-  const hostConfigDiscovery = getConfiguredHostConfigDiscovery(overridePath, cwd);
+export function loadMcpConfig(
+  overridePath?: string,
+  cwd = process.cwd(),
+  options: McpConfigResolutionOptions = {},
+): McpConfig {
+  const sourcePlan = getConfigSourcePlan(overridePath, cwd, options);
+  const sourceSpecs = sourcePlan.active;
+  const includeProjectConfigs = sourcePlan.projectConfigDiscovery === "on";
+  const hostConfigDiscovery = getConfiguredHostConfigDiscovery(overridePath, cwd, options);
   // Host files are a lower-precedence fallback. This ordering means an opt-in
   // discovery cannot override a shared or Pi-owned definition, and all normal
   // URL-bound credential stripping remains in mergeServerMaps.
   let config: McpConfig = !isExclusiveConfigMode() && hostConfigDiscovery === "on"
-    ? loadDiscoveredHostConfigs(cwd)
+    ? loadDiscoveredHostConfigs(cwd, includeProjectConfigs)
     : { mcpServers: {} };
 
   for (const source of sourceSpecs) {
     const loaded = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`);
     if (!loaded) continue;
-    config = mergeConfigs(config, expandImports(loaded, cwd));
+    const sourceConfig = source.scope === "project"
+      ? withoutProjectDiscoveryConfig(loaded)
+      : loaded;
+    config = mergeConfigs(config, expandImports(sourceConfig, cwd, includeProjectConfigs));
   }
 
+  const effectiveSettings: McpSettings = {
+    ...config.settings,
+    projectConfigDiscovery: sourcePlan.projectConfigDiscovery,
+  };
+  config = { ...config, settings: effectiveSettings };
   if (isExclusiveConfigMode()) return resolveConfiguredClaudePluginMcp(config, cwd);
 
-  const packageConfig = loadPackageMcpConfigs(cwd);
-  const pluginConfig = loadAgentPluginConfigs(config.settings?.agentPluginPaths, cwd);
+  const packageConfig = includeProjectConfigs ? loadPackageMcpConfigs(cwd) : { mcpServers: {} };
+  const pluginConfig = loadAgentPluginConfigs(effectiveSettings.agentPluginPaths, cwd);
   const packageServers = Object.fromEntries(
     Object.entries(packageConfig.mcpServers).filter(([name]) => !Object.hasOwn(pluginConfig.mcpServers, name)),
   );
@@ -387,27 +464,60 @@ function applySettingDefaults(config: McpConfig): McpConfig {
   return { ...config, mcpServers };
 }
 
-function getMergedSettings(overridePath?: string, cwd = process.cwd()): McpSettings | undefined {
+function withoutProjectDiscoverySetting(settings: McpSettings | undefined): McpSettings | undefined {
+  if (!settings || settings.projectConfigDiscovery === undefined) return settings;
+  const next = { ...settings };
+  delete next.projectConfigDiscovery;
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function withoutProjectDiscoveryConfig(config: McpConfig): McpConfig {
+  const settings = withoutProjectDiscoverySetting(config.settings);
+  return {
+    mcpServers: config.mcpServers,
+    ...(config.imports !== undefined ? { imports: config.imports } : {}),
+    ...(settings !== undefined ? { settings } : {}),
+    ...(config.claudePlugins !== undefined ? { claudePlugins: config.claudePlugins } : {}),
+  };
+}
+
+function getMergedSettings(
+  overridePath?: string,
+  cwd = process.cwd(),
+  options: McpConfigResolutionOptions = {},
+): McpSettings | undefined {
   let settings: McpSettings | undefined;
-  for (const source of getConfigSources(overridePath, cwd)) {
+  for (const source of getConfigSources(overridePath, cwd, options)) {
     const loaded = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`);
-    if (loaded?.settings) settings = { ...settings, ...loaded.settings };
+    const sourceSettings = source.scope === "project"
+      ? withoutProjectDiscoverySetting(loaded?.settings)
+      : loaded?.settings;
+    if (sourceSettings) settings = { ...settings, ...sourceSettings };
   }
   return settings;
 }
 
-function getConfiguredHostConfigDiscovery(overridePath?: string, cwd = process.cwd()): HostConfigDiscovery {
+function getConfiguredHostConfigDiscovery(
+  overridePath?: string,
+  cwd = process.cwd(),
+  options: McpConfigResolutionOptions = {},
+): HostConfigDiscovery {
   let configured: HostConfigDiscovery = "off";
-  const settings = getMergedSettings(overridePath, cwd);
+  const settings = getMergedSettings(overridePath, cwd, options);
   const value = settings?.hostConfigDiscovery;
   if (value === "off" || value === "prompt" || value === "on") configured = value;
   return configured;
 }
 
-function loadDiscoveredHostConfigs(cwd: string): McpConfig {
+function loadDiscoveredHostConfigs(cwd: string, includeProjectConfigs: boolean): McpConfig {
   let config: McpConfig = { mcpServers: {} };
   for (const importKind of Object.keys(IMPORT_PATHS) as ImportKind[]) {
-    const imported = loadImportedConfig(importKind, cwd, `Failed to discover imported MCP config from ${importKind}:`);
+    const imported = loadImportedConfig(
+      importKind,
+      cwd,
+      `Failed to discover imported MCP config from ${importKind}:`,
+      includeProjectConfigs,
+    );
     if (!imported) continue;
     config = mergeConfigs(config, {
       mcpServers: extractServers(imported.value, importKind),
@@ -420,6 +530,7 @@ function getConfigConflicts(
   sourceSpecs: ConfigSourceSpec[],
   imports: ImportConfigSummary[],
   cwd: string,
+  includeProjectConfigs: boolean,
 ): McpConfigConflict[] {
   const seen = new Map<string, Array<{ kind: "shared" | "pi" | "host"; path: string }>>();
   const record = (name: string, source: { kind: "shared" | "pi" | "host"; path: string }): void => {
@@ -431,7 +542,12 @@ function getConfigConflicts(
   // Host candidates are listed first because, when enabled, they are the
   // lowest-precedence fallback. The fixed IMPORT_PATHS order is deterministic.
   for (const entry of imports) {
-    const imported = loadImportedConfig(entry.kind, cwd, `Failed to inspect imported MCP config from ${entry.kind}:`);
+    const imported = loadImportedConfig(
+      entry.kind,
+      cwd,
+      `Failed to inspect imported MCP config from ${entry.kind}:`,
+      includeProjectConfigs,
+    );
     if (!imported) continue;
     for (const name of Object.keys(extractServers(imported.value, entry.kind))) {
       record(name, { kind: "host", path: imported.path });
@@ -442,7 +558,12 @@ function getConfigConflicts(
     if (!loaded) continue;
     if (loaded.imports?.length) {
       for (const importKind of loaded.imports) {
-        const imported = loadImportedConfig(importKind, cwd, `Failed to inspect imported MCP config from ${importKind}:`);
+        const imported = loadImportedConfig(
+          importKind,
+          cwd,
+          `Failed to inspect imported MCP config from ${importKind}:`,
+          includeProjectConfigs,
+        );
         if (!imported) continue;
         for (const name of Object.keys(extractServers(imported.value, importKind))) {
           record(name, { kind: "host", path: imported.path });
@@ -463,7 +584,7 @@ function getConfigConflicts(
     .sort((left, right) => left.serverName.localeCompare(right.serverName));
 }
 
-function getConfigSources(overridePath?: string, cwd = process.cwd()): ConfigSourceSpec[] {
+function getAllConfigSources(overridePath?: string, cwd = process.cwd()): ConfigSourceSpec[] {
   const userPath = getPiGlobalConfigPath(overridePath);
   const projectPath = getProjectConfigPath(cwd);
   const projectPiPath = getProjectPiConfigPath(cwd);
@@ -648,6 +769,45 @@ function isExclusiveConfigMode(): boolean {
   return process.env.PI_MCP_CONFIG_MODE?.trim().toLowerCase() === "exclusive";
 }
 
+function getConfiguredProjectConfigDiscovery(globalSources: ConfigSourceSpec[]): ProjectConfigDiscovery {
+  let configured: ProjectConfigDiscovery = "on";
+  for (const source of globalSources) {
+    const loaded = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`);
+    const value = loaded?.settings?.projectConfigDiscovery;
+    if (value === "off" || value === "on") {
+      configured = value;
+    } else if (value !== undefined) {
+      console.warn(
+        `Ignoring invalid settings.projectConfigDiscovery in ${source.readPath}; expected "off" or "on"`,
+      );
+    }
+  }
+  return configured;
+}
+
+function getConfigSourcePlan(
+  overridePath?: string,
+  cwd = process.cwd(),
+  options: McpConfigResolutionOptions = {},
+): ConfigSourcePlan {
+  const all = getAllConfigSources(overridePath, cwd);
+  const globalSources = all.filter((source) => source.scope === "global");
+  const configuredProjectConfigDiscovery = getConfiguredProjectConfigDiscovery(globalSources);
+  const projectConfigDiscovery = options.projectConfigDiscovery ?? configuredProjectConfigDiscovery;
+  const active = isExclusiveConfigMode() || projectConfigDiscovery === "off"
+    ? globalSources
+    : all;
+  return { all, active, projectConfigDiscovery };
+}
+
+function getConfigSources(
+  overridePath?: string,
+  cwd = process.cwd(),
+  options: McpConfigResolutionOptions = {},
+): ConfigSourceSpec[] {
+  return getConfigSourcePlan(overridePath, cwd, options).active;
+}
+
 function mergeConfigs(base: McpConfig, next: McpConfig): McpConfig {
   const imports = mergeImports(base.imports, next.imports);
   const settings = next.settings ? { ...base.settings, ...next.settings } : base.settings;
@@ -734,12 +894,21 @@ function mergeImports(left: ImportKind[] | undefined, right: ImportKind[] | unde
   return [...new Set(merged)];
 }
 
-function expandImports(config: McpConfig, cwd = process.cwd()): McpConfig {
+function expandImports(
+  config: McpConfig,
+  cwd: string,
+  includeProjectConfigs: boolean,
+): McpConfig {
   if (!config.imports?.length) return config;
 
   const importedServers: Record<string, ServerEntry> = {};
   for (const importKind of config.imports) {
-    const imported = loadImportedConfig(importKind, cwd, `Failed to import MCP config from ${importKind}:`);
+    const imported = loadImportedConfig(
+      importKind,
+      cwd,
+      `Failed to import MCP config from ${importKind}:`,
+      includeProjectConfigs,
+    );
     if (!imported) continue;
 
     const servers = extractServers(imported.value, importKind);
@@ -758,32 +927,46 @@ function expandImports(config: McpConfig, cwd = process.cwd()): McpConfig {
   };
 }
 
-function resolveImportCandidates(importKind: ImportKind, cwd: string): string[] {
-  return (IMPORT_PATHS[importKind] ?? []).map((candidate) => {
-    if (importKind === "opencode" && candidate === "./opencode.json") {
-      const start = resolve(cwd);
-      let gitRoot: string | undefined;
-      let current = start;
-      while (true) {
-        if (existsSync(join(current, ".git"))) {
-          gitRoot = current;
-          break;
-        }
-        const parent = dirname(current);
-        if (parent === current) break;
-        current = parent;
+function resolveImportCandidate(importKind: ImportKind, candidate: string, cwd: string): string {
+  if (importKind === "opencode" && candidate === "./opencode.json") {
+    const start = resolve(cwd);
+    let gitRoot: string | undefined;
+    let current = start;
+    while (true) {
+      if (existsSync(join(current, ".git"))) {
+        gitRoot = current;
+        break;
       }
-
-      if (!gitRoot) return join(start, "opencode.json");
-      current = start;
-      while (true) {
-        const projectConfig = join(current, "opencode.json");
-        if (existsSync(projectConfig) || current === gitRoot) return projectConfig;
-        current = dirname(current);
-      }
+      const parent = dirname(current);
+      if (parent === current) break;
+      current = parent;
     }
-    return candidate.startsWith(".") ? resolve(cwd, candidate) : candidate;
-  });
+
+    if (!gitRoot) return join(start, "opencode.json");
+    current = start;
+    while (true) {
+      const projectConfig = join(current, "opencode.json");
+      if (existsSync(projectConfig) || current === gitRoot) return projectConfig;
+      current = dirname(current);
+    }
+  }
+  return candidate.startsWith(".") ? resolve(cwd, candidate) : candidate;
+}
+
+function resolveImportCandidates(
+  importKind: ImportKind,
+  cwd: string,
+  includeProjectConfigs: boolean,
+): string[] {
+  return (IMPORT_PATHS[importKind] ?? [])
+    .filter((candidate) => includeProjectConfigs || !candidate.startsWith("."))
+    .map((candidate) => resolveImportCandidate(importKind, candidate, cwd));
+}
+
+function resolveProjectImportCandidates(importKind: ImportKind, cwd: string): string[] {
+  return (IMPORT_PATHS[importKind] ?? [])
+    .filter((candidate) => candidate.startsWith("."))
+    .map((candidate) => resolveImportCandidate(importKind, candidate, cwd));
 }
 
 function readImportedConfig(path: string): unknown {
@@ -795,12 +978,13 @@ function loadImportedConfig(
   importKind: ImportKind,
   cwd: string,
   warningPrefix: string,
+  includeProjectConfigs: boolean,
 ): { path: string; value: unknown } | null {
   if (importKind === "opencode") {
     let merged: Record<string, unknown> = {};
     let highestPrecedencePath: string | undefined;
 
-    for (const path of resolveImportCandidates(importKind, cwd)) {
+    for (const path of resolveImportCandidates(importKind, cwd, includeProjectConfigs)) {
       if (!existsSync(path)) continue;
 
       try {
@@ -837,7 +1021,7 @@ function loadImportedConfig(
     return highestPrecedencePath ? { path: highestPrecedencePath, value: merged } : null;
   }
 
-  for (const path of resolveImportCandidates(importKind, cwd)) {
+  for (const path of resolveImportCandidates(importKind, cwd, includeProjectConfigs)) {
     if (!existsSync(path)) continue;
 
     try {
@@ -850,8 +1034,17 @@ function loadImportedConfig(
   return null;
 }
 
-function resolveImportPath(importKind: ImportKind, cwd = process.cwd()): string | null {
-  return loadImportedConfig(importKind, cwd, `Failed to discover imported MCP config from ${importKind}:`)?.path ?? null;
+function resolveImportPath(
+  importKind: ImportKind,
+  cwd: string,
+  includeProjectConfigs: boolean,
+): string | null {
+  return loadImportedConfig(
+    importKind,
+    cwd,
+    `Failed to discover imported MCP config from ${importKind}:`,
+    includeProjectConfigs,
+  )?.path ?? null;
 }
 
 function readValidatedConfig(path: string, label: string): McpConfig | null {
@@ -1272,8 +1465,13 @@ export function writeProjectServerDisabledOverride(
   cwd: string,
   serverName: string,
   disabled: boolean,
+  options: McpConfigResolutionOptions = {},
 ): ServerDisabledOverrideResult {
   const filePath = getProjectPiConfigPath(cwd);
+  const includeProjectConfigs = getConfigSourcePlan(overridePath, cwd, options).projectConfigDiscovery === "on";
+  if (!includeProjectConfigs) {
+    throw new Error("Cannot write a project MCP override while project MCP discovery is off");
+  }
   let raw: Record<string, unknown> = {};
   if (existsSync(filePath)) {
     try {
@@ -1305,16 +1503,23 @@ export function writeProjectServerDisabledOverride(
   } else {
     next = Object.fromEntries(Object.entries(existing ?? {}).filter(([key]) => key !== "disabled"));
     let lowerConfig: McpConfig = { mcpServers: {} };
-    for (const source of getConfigSources(overridePath, cwd)) {
+    for (const source of getConfigSources(overridePath, cwd, options)) {
       if (source.readPath === filePath) continue;
       const loaded = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`);
-      if (loaded) lowerConfig = mergeConfigs(lowerConfig, expandImports(loaded, cwd));
+      if (loaded) lowerConfig = mergeConfigs(lowerConfig, expandImports(loaded, cwd, includeProjectConfigs));
     }
     if (raw.imports !== undefined) {
       if (!Array.isArray(raw.imports) || raw.imports.some((kind) => typeof kind !== "string" || !Object.hasOwn(IMPORT_PATHS, kind))) {
         throw new Error(`Failed to update project MCP override at ${filePath}: imports contains an unsupported config kind`);
       }
-      lowerConfig = mergeConfigs(lowerConfig, expandImports({ mcpServers: {}, imports: raw.imports as ImportKind[] }, cwd));
+      lowerConfig = mergeConfigs(
+        lowerConfig,
+        expandImports(
+          { mcpServers: {}, imports: raw.imports as ImportKind[] },
+          cwd,
+          includeProjectConfigs,
+        ),
+      );
     }
     if (isServerDisabled(lowerConfig.mcpServers[serverName])) next.disabled = false;
   }
@@ -1388,7 +1593,9 @@ function detectRepoPrompt(summary: Omit<McpDiscoverySummary, "fingerprint" | "re
   }
 
   const projectRoot = findProjectRoot(cwd);
-  const targetPath = projectRoot ? join(projectRoot, PROJECT_CONFIG_NAME) : GENERIC_GLOBAL_CONFIG_PATH;
+  const targetPath = summary.projectConfigDiscovery === "on" && projectRoot
+    ? join(projectRoot, PROJECT_CONFIG_NAME)
+    : GENERIC_GLOBAL_CONFIG_PATH;
   return {
     configured: false,
     executablePath,
@@ -1470,13 +1677,24 @@ export function writeSharedServerEntry(filePath: string, serverName: string, ent
   return filePath;
 }
 
-export function getServerProvenance(overridePath?: string, cwd = process.cwd()): Map<string, ServerProvenance> {
+export function getServerProvenance(
+  overridePath?: string,
+  cwd = process.cwd(),
+  options: McpConfigResolutionOptions = {},
+): Map<string, ServerProvenance> {
   const provenance = new Map<string, ServerProvenance>();
   const userPath = getPiGlobalConfigPath(overridePath);
+  const sourcePlan = getConfigSourcePlan(overridePath, cwd, options);
+  const includeProjectConfigs = sourcePlan.projectConfigDiscovery === "on";
 
-  if (getConfiguredHostConfigDiscovery(overridePath, cwd) === "on") {
+  if (getConfiguredHostConfigDiscovery(overridePath, cwd, options) === "on") {
     for (const importKind of Object.keys(IMPORT_PATHS) as ImportKind[]) {
-      const imported = loadImportedConfig(importKind, cwd, `Failed to inspect imported MCP config from ${importKind}:`);
+      const imported = loadImportedConfig(
+        importKind,
+        cwd,
+        `Failed to inspect imported MCP config from ${importKind}:`,
+        includeProjectConfigs,
+      );
       if (!imported) continue;
       for (const name of Object.keys(extractServers(imported.value, importKind))) {
         // Keep writes inside Pi-owned storage even though the source is external.
@@ -1486,13 +1704,18 @@ export function getServerProvenance(overridePath?: string, cwd = process.cwd()):
     }
   }
 
-  for (const source of getConfigSources(overridePath, cwd)) {
+  for (const source of sourcePlan.active) {
     const loaded = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`);
     if (!loaded) continue;
 
     if (loaded.imports?.length) {
       for (const importKind of loaded.imports) {
-        const imported = loadImportedConfig(importKind, cwd, `Failed to inspect imported MCP config from ${importKind}:`);
+        const imported = loadImportedConfig(
+          importKind,
+          cwd,
+          `Failed to inspect imported MCP config from ${importKind}:`,
+          includeProjectConfigs,
+        );
         if (!imported) continue;
 
         const servers = extractServers(imported.value, importKind);

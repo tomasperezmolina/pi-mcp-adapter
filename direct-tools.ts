@@ -2,7 +2,7 @@ import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from 
 import { UrlElicitationRequiredError, type Client } from "@modelcontextprotocol/client";
 import type { McpExtensionState } from "./state.ts";
 import type { DirectToolSpec, McpContent } from "./types.ts";
-import { lazyConnect, getFailureAgeSeconds, clearFailure } from "./init.ts";
+import { lazyConnect, getFailureAgeSeconds, clearFailure, updateStatusBar } from "./init.ts";
 import { abortable, throwIfAborted } from "./abort.ts";
 import { formatSchema } from "./tool-metadata.ts";
 import { resolveMcpResultContent, transformMcpResourceContents } from "./tool-registrar.ts";
@@ -10,7 +10,8 @@ import { guardMcpOutput, guardedMcpDetails, resolveMcpOutputGuardOptions } from 
 import { maybeStartUiSession, summarizeUiSessionResult, type UiSessionRuntime } from "./ui-session.ts";
 import { isServerDisabled } from "./types.ts";
 import { authenticate, supportsOAuth } from "./mcp-auth-flow.ts";
-import { formatAuthRequiredMessage, normalizeToolArguments, resolveServerUrl } from "./utils.ts";
+import { createInteractiveOAuthHandlers } from "./mcp-auth-ui.ts";
+import { formatAuthRequiredMessage, formatMcpStatus, normalizeToolArguments, resolveServerUrl } from "./utils.ts";
 import { SessionRecoveryAuthRequiredError, withSessionRecovery } from "./session-recovery.ts";
 import { combineAbortSignals, isAbortError } from "./runtime-owner.ts";
 import { callToolViaTaskSession } from "./mcp-tasks.ts";
@@ -87,22 +88,23 @@ async function attemptDirectAutoAuth(
     };
   }
 
+  if (state.ui) {
+    state.ui.setStatus("mcp", formatMcpStatus(state.config, `authenticating ${serverName}...`));
+  }
   try {
-    if (state.authStorageOptions) {
-      await authenticate(
-        serverName,
-        serverUrl,
-        definition,
-        signal
-          ? { authStorageOptions: state.authStorageOptions, signal, runtime: state.oauthRuntime }
-          : { authStorageOptions: state.authStorageOptions, runtime: state.oauthRuntime },
-      );
-    } else {
-      await authenticate(serverName, serverUrl, definition, {
-        ...(signal ? { signal } : {}),
-        runtime: state.oauthRuntime,
-      });
-    }
+    await authenticate(serverName, serverUrl, definition, {
+      ...(state.authStorageOptions ? { authStorageOptions: state.authStorageOptions } : {}),
+      ...(state.ui
+        ? createInteractiveOAuthHandlers(serverName, {
+            ui: state.ui,
+            openBrowser: state.openBrowser,
+            copyText: state.copyText,
+            manualCallbackFallback: state.config.settings?.manualOAuthCallbackFallback !== false,
+          })
+        : {}),
+      ...(signal ? { signal } : {}),
+      ...(state.oauthRuntime ? { runtime: state.oauthRuntime } : {}),
+    });
     return { status: "success" };
   } catch (error) {
     if (isAbortError(error, signal)) throw error;
@@ -111,6 +113,8 @@ async function attemptDirectAutoAuth(
       status: "failed",
       message: getDirectAuthFailedMessage(state, serverName, message),
     };
+  } finally {
+    updateStatusBar(state);
   }
 }
 
@@ -347,7 +351,7 @@ export function createDirectToolExecutor(
 
       const content = resolveMcpResultContent(result as Record<string, unknown>, state.owner?.signal);
       const outputContent = content.length > 0 ? content : [{ type: "text" as const, text: "(empty result)" }];
-      if (hasUi) {
+      if (uiSession) {
         const uiSummary = summarizeUiSessionResult(uiSession);
         const guarded = await guardMcpOutput(outputContent, {
           ...outputGuardOptions,

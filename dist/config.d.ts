@@ -1,5 +1,5 @@
 import { type AgentPluginSummary } from "./agent-plugin-loader.ts";
-import { type HostConfigDiscovery, type McpConfig, type ServerEntry, type ImportKind, type ServerProvenance } from "./types.ts";
+import { type HostConfigDiscovery, type ProjectConfigDiscovery, type McpConfig, type ServerEntry, type ImportKind, type ServerProvenance } from "./types.ts";
 export interface KnownServerPreset {
     id: string;
     name: string;
@@ -17,6 +17,9 @@ interface ConfigSourceSpec {
     shared: boolean;
     scope: "global" | "project";
 }
+export interface McpConfigResolutionOptions {
+    projectConfigDiscovery?: ProjectConfigDiscovery;
+}
 export interface ConfigDiscoveryPath {
     label: string;
     path: string;
@@ -30,6 +33,7 @@ export interface ConfigDiscoverySource extends ConfigDiscoveryPath {
     id: ConfigSourceSpec["id"];
     scope: ConfigSourceSpec["scope"];
     kind: "shared" | "pi";
+    active: boolean;
     serverCount: number;
 }
 export interface ImportConfigSummary extends DiscoveredImportConfig {
@@ -62,6 +66,7 @@ export interface McpDiscoverySummary {
     imports: ImportConfigSummary[];
     hostConfigs: HostConfigSummary[];
     hostConfigDiscovery: HostConfigDiscovery;
+    projectConfigDiscovery: ProjectConfigDiscovery;
     agentPlugins: AgentPluginSummary[];
     conflicts: McpConfigConflict[];
     hasAnyConfig: boolean;
@@ -91,14 +96,15 @@ export declare function getGenericGlobalConfigPath(): string;
 export declare function getProjectConfigPath(cwd?: string): string;
 export declare function getProjectPiConfigPath(cwd?: string): string;
 export declare function getSharedConfigPath(target: SharedConfigTarget, cwd?: string): string;
-export declare function getConfigDiscoveryPaths(overridePath?: string, cwd?: string): ConfigDiscoveryPath[];
-export declare function findAvailableImportConfigs(cwd?: string): DiscoveredImportConfig[];
-export declare function getMcpStandardConfigSummary(overridePath?: string, cwd?: string): McpStandardConfigSummary;
+export declare function getConfigDiscoveryPaths(overridePath?: string, cwd?: string, options?: McpConfigResolutionOptions): ConfigDiscoveryPath[];
+export declare function findAvailableImportConfigs(cwd?: string, options?: McpConfigResolutionOptions): DiscoveredImportConfig[];
+export declare function getMcpStandardConfigSummary(overridePath?: string, cwd?: string, options?: McpConfigResolutionOptions): McpStandardConfigSummary;
 export declare function getMcpDiscoverySummary(overridePath?: string, cwd?: string, options?: {
     includeHostConfigs?: boolean;
+    projectConfigDiscovery?: ProjectConfigDiscovery;
 }): McpDiscoverySummary;
 export declare function cloneMcpConfig(config: McpConfig): McpConfig;
-export declare function loadMcpConfig(overridePath?: string, cwd?: string): McpConfig;
+export declare function loadMcpConfig(overridePath?: string, cwd?: string, options?: McpConfigResolutionOptions): McpConfig;
 export declare function resolveConfiguredClaudePluginMcp(config: McpConfig, cwd?: string): McpConfig;
 export declare function discoverConfiguredClaudePluginSkills(config: McpConfig, cwd?: string): string[];
 export declare function writeSharedConfigText(filePath: string, text: string): void;
@@ -115,7 +121,7 @@ export interface ServerDisabledOverrideResult {
  * explicit false only when a lower-precedence source is itself disabled; this
  * writer never copies a server definition or its credentials into the file.
  */
-export declare function writeProjectServerDisabledOverride(overridePath: string | undefined, cwd: string, serverName: string, disabled: boolean): ServerDisabledOverrideResult;
+export declare function writeProjectServerDisabledOverride(overridePath: string | undefined, cwd: string, serverName: string, disabled: boolean, options?: McpConfigResolutionOptions): ServerDisabledOverrideResult;
 export declare function previewCompatibilityImports(importKinds: ImportKind[], overridePath?: string): ConfigWritePreview;
 export declare function ensureCompatibilityImports(importKinds: ImportKind[], overridePath?: string): {
     path: string;
@@ -128,7 +134,7 @@ export declare function previewStarterProjectConfig(cwd?: string): ConfigWritePr
 export declare function writeStarterProjectConfig(cwd?: string): string;
 export declare function previewSharedServerEntry(filePath: string, serverName: string, entry: ServerEntry): ConfigWritePreview;
 export declare function writeSharedServerEntry(filePath: string, serverName: string, entry: ServerEntry): string;
-export declare function getServerProvenance(overridePath?: string, cwd?: string): Map<string, ServerProvenance>;
+export declare function getServerProvenance(overridePath?: string, cwd?: string, options?: McpConfigResolutionOptions): Map<string, ServerProvenance>;
 export declare function writeDirectToolsConfig(changes: Map<string, true | string[] | false>, provenance: Map<string, ServerProvenance>, fullConfig: McpConfig): void;
 export declare function resolveConfiguredOAuthDir(raw: unknown, cwd?: string): string | undefined;
 export {};
